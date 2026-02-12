@@ -36,6 +36,15 @@ def build_context() -> AutomationContext:
             finance_yahoo_b3_url=(
                 "https://query1.finance.yahoo.com/v8/finance/chart/%5EBVSP?interval=1d&range=1d"
             ),
+            locaweb_summary_url="https://statusblog.locaweb.com.br/api/v2/summary.json",
+            locaweb_components_url="https://statusblog.locaweb.com.br/api/v2/components.json",
+            locaweb_incidents_url="https://statusblog.locaweb.com.br/api/v2/incidents.json",
+            meta_orgs_url="https://metastatus.com/data/orgs.json",
+            meta_outages_url_template="https://metastatus.com/data/outages/{org}.history.json",
+            meta_metrics_url_template="https://metastatus.com/metrics/{org}/{metric}.json",
+            umbrella_summary_url="https://status.umbrella.com/api/v2/summary.json",
+            umbrella_incidents_url="https://status.umbrella.com/api/v2/incidents.json",
+            host_report_timezone="America/Sao_Paulo",
         )
     )
 
