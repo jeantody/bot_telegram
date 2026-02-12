@@ -3,3 +3,5 @@ python-dotenv==1.1.1
 httpx==0.28.1
 feedparser==6.0.12
 beautifulsoup4==4.13.5
+pytest==8.4.2
+pytest-asyncio==1.2.0
