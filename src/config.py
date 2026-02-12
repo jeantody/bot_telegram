@@ -18,6 +18,15 @@ class Settings:
     trends_fallback_url: str
     finance_awesomeapi_url: str
     finance_yahoo_b3_url: str
+    locaweb_summary_url: str
+    locaweb_components_url: str
+    locaweb_incidents_url: str
+    meta_orgs_url: str
+    meta_outages_url_template: str
+    meta_metrics_url_template: str
+    umbrella_summary_url: str
+    umbrella_incidents_url: str
+    host_report_timezone: str
 
 
 def _read_int(name: str, default: int) -> int:
@@ -59,5 +68,41 @@ def load_settings() -> Settings:
         finance_yahoo_b3_url=os.getenv(
             "FINANCE_YAHOO_B3_URL",
             "https://query1.finance.yahoo.com/v8/finance/chart/%5EBVSP?interval=1d&range=1d",
+        ).strip(),
+        locaweb_summary_url=os.getenv(
+            "LOCAWEB_SUMMARY_URL",
+            "https://statusblog.locaweb.com.br/api/v2/summary.json",
+        ).strip(),
+        locaweb_components_url=os.getenv(
+            "LOCAWEB_COMPONENTS_URL",
+            "https://statusblog.locaweb.com.br/api/v2/components.json",
+        ).strip(),
+        locaweb_incidents_url=os.getenv(
+            "LOCAWEB_INCIDENTS_URL",
+            "https://statusblog.locaweb.com.br/api/v2/incidents.json",
+        ).strip(),
+        meta_orgs_url=os.getenv(
+            "META_ORGS_URL",
+            "https://metastatus.com/data/orgs.json",
+        ).strip(),
+        meta_outages_url_template=os.getenv(
+            "META_OUTAGES_URL_TEMPLATE",
+            "https://metastatus.com/data/outages/{org}.history.json",
+        ).strip(),
+        meta_metrics_url_template=os.getenv(
+            "META_METRICS_URL_TEMPLATE",
+            "https://metastatus.com/metrics/{org}/{metric}.json",
+        ).strip(),
+        umbrella_summary_url=os.getenv(
+            "UMBRELLA_SUMMARY_URL",
+            "https://status.umbrella.com/api/v2/summary.json",
+        ).strip(),
+        umbrella_incidents_url=os.getenv(
+            "UMBRELLA_INCIDENTS_URL",
+            "https://status.umbrella.com/api/v2/incidents.json",
+        ).strip(),
+        host_report_timezone=os.getenv(
+            "HOST_REPORT_TIMEZONE",
+            "America/Sao_Paulo",
         ).strip(),
     )

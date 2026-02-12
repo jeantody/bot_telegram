@@ -6,9 +6,11 @@ Bot em Python para executar automações pelo Telegram com arquitetura separada 
 
 ## Funcionalidades
 - Comando `status` e `/status`
-- Envio de 4 mensagens separadas:
+- Comando `/host` para monitoramento de infraestrutura (Locaweb, Meta e Cisco Umbrella)
+- Comando `/all` para executar `status` e depois `/host`
+- Envio de 4 mensagens separadas no `status`:
 1. Noticias (Top 10 G1, Top 10 TecMundo, ultimas 5 BoletimSec)
-2. Clima de Sao Paulo (agora, 12:00, 19:00, 21:00, chuva 17:30-19:00)
+2. Clima de Sao Paulo (agora, 12:00, 19:00, 21:00, chuva 17:00-19:00)
 3. Trends Brasil (fonte publica alternativa)
 4. Cotacoes financeiras:
    - Bitcoin (BTC/BRL)
@@ -33,6 +35,10 @@ Edite `.env`:
 - `TELEGRAM_ALLOWED_CHAT_ID`: chat autorizado para uso
 - `FINANCE_AWESOMEAPI_URL`: endpoint de moedas e bitcoin (AwesomeAPI)
 - `FINANCE_YAHOO_B3_URL`: endpoint do IBOV (Yahoo Chart API)
+- `LOCAWEB_SUMMARY_URL`, `LOCAWEB_COMPONENTS_URL`, `LOCAWEB_INCIDENTS_URL`: endpoints da Locaweb
+- `META_ORGS_URL`, `META_OUTAGES_URL_TEMPLATE`, `META_METRICS_URL_TEMPLATE`: endpoints da Meta
+- `UMBRELLA_SUMMARY_URL`, `UMBRELLA_INCIDENTS_URL`: endpoints da Cisco Umbrella
+- `HOST_REPORT_TIMEZONE`: timezone usada no filtro de incidentes do dia
 
 ## Executar
 ```powershell
