@@ -76,12 +76,30 @@ def build_context() -> AutomationContext:
 
 @pytest.mark.asyncio
 async def test_status_host_formats_consolidated_report() -> None:
-    incident = HostIncident(
+    short_incident = HostIncident(
         source_id="1",
         title="Falha no acesso",
         status="Resolved",
         started_at=None,
         updates=[HostIncidentUpdate(status="Identified", body="Em analise", display_at=None)],
+    )
+    umbrella_incident = HostIncident(
+        source_id="2",
+        title="[Umbrella/Secure Connect] Policy Enforcement service is delayed processing globally",
+        status="Resolved",
+        started_at=None,
+        updates=[
+            HostIncidentUpdate(
+                status="Identified",
+                body=(
+                    "All policy files have now been processed and the queue is clear. "
+                    "Policy generation is functioning as expected, with new policies being "
+                    "applied promptly after configuration. Verification confirms that "
+                    "policies are being delivered efficiently."
+                ),
+                display_at=None,
+            )
+        ],
     )
     automation = StatusHostAutomation(
         FakeProvider(
@@ -94,7 +112,7 @@ async def test_status_host_formats_consolidated_report() -> None:
                         "Outros...": "operational",
                     },
                     all_operational=True,
-                    incidents_today=[incident],
+                    incidents_today=[short_incident],
                     error=None,
                 ),
                 meta=MetaReport(
@@ -109,7 +127,7 @@ async def test_status_host_formats_consolidated_report() -> None:
                     whatsapp_availability=99.98,
                     whatsapp_latency_p90_ms=1397,
                     whatsapp_latency_p99_ms=2891,
-                    incidents_today=[incident],
+                    incidents_today=[short_incident],
                     error=None,
                 ),
                 umbrella=UmbrellaReport(
@@ -122,7 +140,7 @@ async def test_status_host_formats_consolidated_report() -> None:
                         "Umbrella South America": "Lento",
                     },
                     all_operational=False,
-                    incidents_active_or_today=[incident],
+                    incidents_active_or_today=[umbrella_incident],
                     error=None,
                 ),
             )
@@ -137,6 +155,16 @@ async def test_status_host_formats_consolidated_report() -> None:
     assert "<b>Cisco Umbrella</b>" in result.message
     assert "WhatsApp Availability: 99.98%" in result.message
     assert "P90 1397 ms, P99 2891 ms (last 31 days)" in result.message
+    assert "Meta Admin Center" not in result.message
+    assert "Umbrella Global: Normal (operational)" not in result.message
+    assert "<b>Incidentes ativos/hoje</b>" in result.message
+    assert (
+        "All policy files have now been processed and the queue is clear."
+        in result.message
+    )
+    assert "Policy generation is functioning as expected" in result.message
+    assert "applied promptly after configuration" not in result.message
+    assert "policies are being delivered efficiently." not in result.message
     assert "Incidentes de hoje" in result.message
 
 
@@ -173,5 +201,8 @@ async def test_status_host_hides_incident_sections_when_empty() -> None:
     result = await automation.run(build_context())
 
     assert result.ok is True
+    assert "<b>Locaweb</b>" in result.message
+    assert "Saude: OK" in result.message
+    assert "<b>Cisco Umbrella</b>" not in result.message
     assert "Incidentes de hoje" not in result.message
     assert "Incidentes ativos/hoje" not in result.message
