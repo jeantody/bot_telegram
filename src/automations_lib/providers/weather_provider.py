@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -29,8 +29,18 @@ class WeatherProvider:
     async def fetch_weather(self, city_name: str, timezone_name: str) -> WeatherSnapshot:
         coords = await self._get_coordinates(city_name)
         payload = await self._get_forecast(coords[0], coords[1], timezone_name)
-        now_local = datetime.now(ZoneInfo(timezone_name))
+        now_local = self.current_local_datetime(timezone_name)
         return self.build_snapshot(payload["hourly"], now_local)
+
+    @staticmethod
+    def current_local_datetime(timezone_name: str) -> datetime:
+        try:
+            return datetime.now(ZoneInfo(timezone_name))
+        except ZoneInfoNotFoundError:
+            # Windows environments may not have IANA tzdata available by default.
+            if timezone_name == "America/Sao_Paulo":
+                return datetime.now(timezone(timedelta(hours=-3)))
+            return datetime.now(timezone.utc)
 
     async def _get_coordinates(self, city_name: str) -> tuple[float, float]:
         if self._cached_coords:
@@ -109,4 +119,3 @@ def temp_for_series(
     if idx is None:
         raise ValueError(f"Horario indisponivel na previsao: {key}")
     return values[idx]
-
