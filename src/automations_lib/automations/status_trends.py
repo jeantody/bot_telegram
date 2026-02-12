@@ -23,7 +23,7 @@ class StatusTrendsAutomation:
         lines = [
             "<b>Trending Topics (Brasil)</b>",
             (
-                "Fonte publica alternativa (nao personalizada da sua conta X): "
+                "Fonte publica alternativa: "
                 f"<a href=\"{html.escape(snapshot.source_url, quote=True)}\">"
                 f"{html.escape(snapshot.source_name)}</a>"
             ),

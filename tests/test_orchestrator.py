@@ -21,6 +21,12 @@ def settings() -> Settings:
         weather_city_name="Sao Paulo",
         trends_primary_url="https://getdaytrends.com/brazil/",
         trends_fallback_url="https://trends24.in/brazil/",
+        finance_awesomeapi_url=(
+            "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL,BTC-BRL"
+        ),
+        finance_yahoo_b3_url=(
+            "https://query1.finance.yahoo.com/v8/finance/chart/%5EBVSP?interval=1d&range=1d"
+        ),
     )
 
 

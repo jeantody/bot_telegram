@@ -62,6 +62,12 @@ def build_settings(allowed_chat_id: int | None) -> Settings:
         weather_city_name="Sao Paulo",
         trends_primary_url="https://getdaytrends.com/brazil/",
         trends_fallback_url="https://trends24.in/brazil/",
+        finance_awesomeapi_url=(
+            "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL,BTC-BRL"
+        ),
+        finance_yahoo_b3_url=(
+            "https://query1.finance.yahoo.com/v8/finance/chart/%5EBVSP?interval=1d&range=1d"
+        ),
     )
 
 
@@ -84,20 +90,20 @@ def test_is_status_command_variants() -> None:
 
 
 @pytest.mark.asyncio
-async def test_status_text_sends_three_messages() -> None:
-    orchestrator = FakeOrchestrator([result("m1"), result("m2"), result("m3")])
+async def test_status_text_sends_four_messages() -> None:
+    orchestrator = FakeOrchestrator([result("m1"), result("m2"), result("m3"), result("m4")])
     handlers = BotHandlers(settings=build_settings(allowed_chat_id=123), orchestrator=orchestrator)
     update = FakeUpdate(text="status", chat_id=123)
 
     await handlers.text_handler(update, FakeContext())
 
     assert orchestrator.called_trigger == "status"
-    assert [r["text"] for r in update.message.replies] == ["m1", "m2", "m3"]
+    assert [r["text"] for r in update.message.replies] == ["m1", "m2", "m3", "m4"]
 
 
 @pytest.mark.asyncio
 async def test_status_blocks_unauthorized_chat() -> None:
-    orchestrator = FakeOrchestrator([result("m1"), result("m2"), result("m3")])
+    orchestrator = FakeOrchestrator([result("m1"), result("m2"), result("m3"), result("m4")])
     handlers = BotHandlers(settings=build_settings(allowed_chat_id=123), orchestrator=orchestrator)
     update = FakeUpdate(text="/status", chat_id=999)
 
@@ -106,4 +112,3 @@ async def test_status_blocks_unauthorized_chat() -> None:
     assert orchestrator.called_trigger is None
     assert len(update.message.replies) == 1
     assert "Acesso nao autorizado" in update.message.replies[0]["text"]
-

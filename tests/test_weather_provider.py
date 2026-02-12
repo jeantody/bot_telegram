@@ -20,8 +20,8 @@ def test_build_snapshot_temperatures_and_rain_window() -> None:
     assert snapshot.temperature_12_c == 22.0
     assert snapshot.temperature_19_c == 29.0
     assert snapshot.temperature_21_c == 31.0
-    assert snapshot.rain_probability_avg_1730_1900 == 18.5
-    assert snapshot.rain_probability_peak_1730_1900 == 19.0
+    assert snapshot.rain_probability_avg_1700_1900 == 18.0
+    assert snapshot.rain_probability_peak_1700_1900 == 19.0
 
 
 def test_current_local_datetime_fallback_for_sao_paulo(monkeypatch) -> None:

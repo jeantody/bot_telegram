@@ -16,6 +16,8 @@ class Settings:
     weather_city_name: str
     trends_primary_url: str
     trends_fallback_url: str
+    finance_awesomeapi_url: str
+    finance_yahoo_b3_url: str
 
 
 def _read_int(name: str, default: int) -> int:
@@ -50,5 +52,12 @@ def load_settings() -> Settings:
         trends_fallback_url=os.getenv(
             "TRENDS_FALLBACK_URL", "https://trends24.in/brazil/"
         ).strip(),
+        finance_awesomeapi_url=os.getenv(
+            "FINANCE_AWESOMEAPI_URL",
+            "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL,BTC-BRL",
+        ).strip(),
+        finance_yahoo_b3_url=os.getenv(
+            "FINANCE_YAHOO_B3_URL",
+            "https://query1.finance.yahoo.com/v8/finance/chart/%5EBVSP?interval=1d&range=1d",
+        ).strip(),
     )
-

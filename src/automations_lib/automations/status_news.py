@@ -28,11 +28,11 @@ class StatusNewsAutomation:
     def _format_message(self, bundle: NewsBundle) -> str:
         sections = [
             "<b>Noticias</b>",
-            "<i>Top 10 G1</i>",
+            "<i>Top 10 G1\n</i>",
             self._to_links(bundle.g1),
-            "<i>Top 10 TecMundo</i>",
+            "<i>\nTop 10 TecMundo\n</i>",
             self._to_links(bundle.tecmundo),
-            "<i>Ultimas 5 BoletimSec</i>",
+            "<i>\nUltimas 5 BoletimSec</i>\n",
             self._to_links(bundle.boletimsec),
         ]
         return "\n".join(sections)

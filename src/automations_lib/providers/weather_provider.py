@@ -13,8 +13,8 @@ class WeatherSnapshot:
     temperature_12_c: float
     temperature_19_c: float
     temperature_21_c: float
-    rain_probability_avg_1730_1900: float
-    rain_probability_peak_1730_1900: float
+    rain_probability_avg_1700_1900: float
+    rain_probability_peak_1700_1900: float
     generated_at_local: datetime
 
 
@@ -93,17 +93,18 @@ class WeatherProvider:
         current_idx = min(
             range(len(times)), key=lambda idx: abs(times[idx] - naive_now)
         )
+        rain_17 = temp_for_series(rains, index_by_key, now_local, 17)
         rain_18 = temp_for_series(rains, index_by_key, now_local, 18)
         rain_19 = temp_for_series(rains, index_by_key, now_local, 19)
-        rain_values = [rain_18, rain_19]
+        rain_values = [rain_17, rain_18, rain_19]
 
         return WeatherSnapshot(
             current_temperature_c=temps[current_idx],
             temperature_12_c=temp_for_hour(12),
             temperature_19_c=temp_for_hour(19),
             temperature_21_c=temp_for_hour(21),
-            rain_probability_avg_1730_1900=sum(rain_values) / len(rain_values),
-            rain_probability_peak_1730_1900=max(rain_values),
+            rain_probability_avg_1700_1900=sum(rain_values) / len(rain_values),
+            rain_probability_peak_1700_1900=max(rain_values),
             generated_at_local=now_local,
         )
 
