@@ -8,6 +8,7 @@ Bot em Python para executar automações pelo Telegram com arquitetura separada 
 - Comando `status` e `/status`
 - Comando `/host` para monitoramento de infraestrutura (Locaweb, Meta e Cisco Umbrella)
 - Comando `/all` para executar `status` e depois `/host`
+- `/host` inclui Hostinger e monitoramento de sites sem API
 - Envio de 4 mensagens separadas no `status`:
 1. Noticias (Top 10 G1, Top 10 TecMundo, ultimas 5 BoletimSec)
 2. Clima de Sao Paulo (agora, 12:00, 19:00, 21:00, chuva 17:00-19:00)
@@ -38,6 +39,7 @@ Edite `.env`:
 - `LOCAWEB_SUMMARY_URL`, `LOCAWEB_COMPONENTS_URL`, `LOCAWEB_INCIDENTS_URL`: endpoints da Locaweb
 - `META_ORGS_URL`, `META_OUTAGES_URL_TEMPLATE`, `META_METRICS_URL_TEMPLATE`: endpoints da Meta
 - `UMBRELLA_SUMMARY_URL`, `UMBRELLA_INCIDENTS_URL`: endpoints da Cisco Umbrella
+- `HOSTINGER_SUMMARY_URL`, `HOSTINGER_COMPONENTS_URL`, `HOSTINGER_INCIDENTS_URL`, `HOSTINGER_STATUS_PAGE_URL`: endpoints da Hostinger
 - `HOST_REPORT_TIMEZONE`: timezone usada no filtro de incidentes do dia
 
 ## Executar

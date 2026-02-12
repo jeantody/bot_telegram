@@ -26,6 +26,10 @@ class Settings:
     meta_metrics_url_template: str
     umbrella_summary_url: str
     umbrella_incidents_url: str
+    hostinger_summary_url: str
+    hostinger_components_url: str
+    hostinger_incidents_url: str
+    hostinger_status_page_url: str
     host_report_timezone: str
 
 
@@ -100,6 +104,22 @@ def load_settings() -> Settings:
         umbrella_incidents_url=os.getenv(
             "UMBRELLA_INCIDENTS_URL",
             "https://status.umbrella.com/api/v2/incidents.json",
+        ).strip(),
+        hostinger_summary_url=os.getenv(
+            "HOSTINGER_SUMMARY_URL",
+            "https://statuspage.hostinger.com/api/v2/summary.json",
+        ).strip(),
+        hostinger_components_url=os.getenv(
+            "HOSTINGER_COMPONENTS_URL",
+            "https://statuspage.hostinger.com/api/v2/components.json",
+        ).strip(),
+        hostinger_incidents_url=os.getenv(
+            "HOSTINGER_INCIDENTS_URL",
+            "https://statuspage.hostinger.com/api/v2/incidents.json",
+        ).strip(),
+        hostinger_status_page_url=os.getenv(
+            "HOSTINGER_STATUS_PAGE_URL",
+            "https://statuspage.hostinger.com/",
         ).strip(),
         host_report_timezone=os.getenv(
             "HOST_REPORT_TIMEZONE",

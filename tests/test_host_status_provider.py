@@ -56,6 +56,10 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
     meta_metrics_template = "https://metastatus.com/metrics/{org}/{metric}.json"
     umbrella_summary_url = "https://status.umbrella.com/api/v2/summary.json"
     umbrella_incidents_url = "https://status.umbrella.com/api/v2/incidents.json"
+    hostinger_summary_url = "https://statuspage.hostinger.com/api/v2/summary.json"
+    hostinger_components_url = "https://statuspage.hostinger.com/api/v2/components.json"
+    hostinger_incidents_url = "https://statuspage.hostinger.com/api/v2/incidents.json"
+    hostinger_status_page_url = "https://statuspage.hostinger.com/"
 
     now_iso = _build_today_iso(10, 15)
     responses = {
@@ -143,6 +147,23 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
                 ]
             }
         ),
+        hostinger_summary_url: FakeResponse({"status": {"indicator": "none"}}),
+        hostinger_components_url: FakeResponse(
+            {"components": [{"name": "Global API", "status": "operational"}]}
+        ),
+        hostinger_incidents_url: FakeResponse({"incidents": []}),
+        hostinger_status_page_url: FakeResponse("<html></html>"),
+        "https://private-site-01.example/": FakeResponse({}, status_code=200),
+        "https://private-site-02.example/": FakeResponse({}, status_code=200),
+        "https://private-site-03.example/": FakeResponse({}, status_code=200),
+        "https://private-site-04.example/": FakeResponse({}, status_code=200),
+        "https://private-site-05.example:4433/": FakeResponse({}, status_code=200),
+        "https://private-site-06.example/app/login": FakeResponse({}, status_code=200),
+        "https://private-site-07.example/app/login": FakeResponse({}, status_code=502),
+        "http://private-site-08.example:5001/": FakeResponse({}, status_code=200),
+        "http://private-site-09.example": FakeResponse({}, status_code=200),
+        "https://private-site-10.example/ui/": FakeResponse({}, status_code=200),
+        "https://private-site-11.example/signin?redirect=%252F": FakeResponse({}, status_code=200),
     }
 
     monkeypatch.setattr(
@@ -159,6 +180,10 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
         meta_metrics_url_template=meta_metrics_template,
         umbrella_summary_url=umbrella_summary_url,
         umbrella_incidents_url=umbrella_incidents_url,
+        hostinger_summary_url=hostinger_summary_url,
+        hostinger_components_url=hostinger_components_url,
+        hostinger_incidents_url=hostinger_incidents_url,
+        hostinger_status_page_url=hostinger_status_page_url,
     )
 
     assert snapshot.locaweb.error is None
@@ -172,6 +197,13 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
     assert snapshot.umbrella.error is None
     assert snapshot.umbrella.component_statuses_human["Umbrella South America"] == "Lento"
     assert len(snapshot.umbrella.incidents_active_or_today) == 1
+    assert snapshot.hostinger.mode == "api"
+    assert snapshot.hostinger.overall_ok is True
+    assert len(snapshot.websites.checks) == 11
+    chat_accbook = next(
+        item for item in snapshot.websites.checks if item.label == "Chat Accbook"
+    )
+    assert chat_accbook.is_up is False
 
 
 @pytest.mark.asyncio
@@ -183,6 +215,10 @@ async def test_fetch_snapshot_keeps_partial_output_when_one_source_fails(monkeyp
     meta_metrics_template = "https://metastatus.com/metrics/{org}/{metric}.json"
     umbrella_summary_url = "https://status.umbrella.com/api/v2/summary.json"
     umbrella_incidents_url = "https://status.umbrella.com/api/v2/incidents.json"
+    hostinger_summary_url = "https://statuspage.hostinger.com/api/v2/summary.json"
+    hostinger_components_url = "https://statuspage.hostinger.com/api/v2/components.json"
+    hostinger_incidents_url = "https://statuspage.hostinger.com/api/v2/incidents.json"
+    hostinger_status_page_url = "https://statuspage.hostinger.com/"
 
     responses = {
         locaweb_components_url: RuntimeError("locaweb down"),
@@ -203,6 +239,21 @@ async def test_fetch_snapshot_keeps_partial_output_when_one_source_fails(monkeyp
         ): FakeResponse({"values": []}),
         umbrella_summary_url: FakeResponse({"components": []}),
         umbrella_incidents_url: FakeResponse({"incidents": []}),
+        hostinger_summary_url: RuntimeError("blocked"),
+        hostinger_components_url: RuntimeError("blocked"),
+        hostinger_incidents_url: RuntimeError("blocked"),
+        hostinger_status_page_url: FakeResponse({}, status_code=200),
+        "https://private-site-01.example/": FakeResponse({}, status_code=200),
+        "https://private-site-02.example/": FakeResponse({}, status_code=200),
+        "https://private-site-03.example/": FakeResponse({}, status_code=200),
+        "https://private-site-04.example/": FakeResponse({}, status_code=200),
+        "https://private-site-05.example:4433/": FakeResponse({}, status_code=200),
+        "https://private-site-06.example/app/login": FakeResponse({}, status_code=200),
+        "https://private-site-07.example/app/login": FakeResponse({}, status_code=200),
+        "http://private-site-08.example:5001/": FakeResponse({}, status_code=200),
+        "http://private-site-09.example": FakeResponse({}, status_code=200),
+        "https://private-site-10.example/ui/": FakeResponse({}, status_code=200),
+        "https://private-site-11.example/signin?redirect=%252F": FakeResponse({}, status_code=200),
     }
 
     monkeypatch.setattr(
@@ -219,8 +270,46 @@ async def test_fetch_snapshot_keeps_partial_output_when_one_source_fails(monkeyp
         meta_metrics_url_template=meta_metrics_template,
         umbrella_summary_url=umbrella_summary_url,
         umbrella_incidents_url=umbrella_incidents_url,
+        hostinger_summary_url=hostinger_summary_url,
+        hostinger_components_url=hostinger_components_url,
+        hostinger_incidents_url=hostinger_incidents_url,
+        hostinger_status_page_url=hostinger_status_page_url,
     )
 
     assert snapshot.locaweb.error is not None
     assert snapshot.meta.error is None
     assert snapshot.umbrella.error is None
+    assert snapshot.hostinger.mode == "fallback_page"
+    assert snapshot.hostinger.overall_ok is True
+
+
+@pytest.mark.asyncio
+async def test_websites_rule_only_200_is_up(monkeypatch) -> None:
+    responses = {
+        "https://private-site-01.example/": FakeResponse({}, status_code=200),
+        "https://private-site-02.example/": FakeResponse({}, status_code=301),
+        "https://private-site-03.example/": FakeResponse({}, status_code=502),
+        "https://private-site-04.example/": RuntimeError("timeout"),
+        "https://private-site-05.example:4433/": FakeResponse({}, status_code=200),
+        "https://private-site-06.example/app/login": FakeResponse({}, status_code=200),
+        "https://private-site-07.example/app/login": FakeResponse({}, status_code=200),
+        "http://private-site-08.example:5001/": FakeResponse({}, status_code=200),
+        "http://private-site-09.example": FakeResponse({}, status_code=200),
+        "https://private-site-10.example/ui/": FakeResponse({}, status_code=200),
+        "https://private-site-11.example/signin?redirect=%252F": FakeResponse({}, status_code=200),
+    }
+    monkeypatch.setattr(
+        "src.automations_lib.providers.host_status_provider.httpx.AsyncClient",
+        lambda **kwargs: FakeAsyncClient(responses, **kwargs),
+    )
+    provider = HostStatusProvider(timeout_seconds=10, report_timezone="America/Sao_Paulo")
+    report = await provider._fetch_websites()
+
+    mv = next(item for item in report.checks if item.label == "MV")
+    melior = next(item for item in report.checks if item.label == "Melior")
+    collis = next(item for item in report.checks if item.label == "Collis")
+    voip = next(item for item in report.checks if item.label == "VoipRogini")
+    assert mv.is_up is True
+    assert melior.is_up is False
+    assert collis.is_up is False
+    assert voip.is_up is False

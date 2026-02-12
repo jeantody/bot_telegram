@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.automations_lib.models import AutomationContext, AutomationResult
 from src.automations_lib.providers.host_status_provider import (
+    HostingerReport,
     HostIncident,
     HostIncidentUpdate,
     HostStatusProvider,
@@ -13,6 +14,7 @@ from src.automations_lib.providers.host_status_provider import (
     MetaOrgReport,
     MetaReport,
     UmbrellaReport,
+    WebsiteChecksReport,
 )
 
 
@@ -42,6 +44,10 @@ class StatusHostAutomation:
             meta_metrics_url_template=settings.meta_metrics_url_template,
             umbrella_summary_url=settings.umbrella_summary_url,
             umbrella_incidents_url=settings.umbrella_incidents_url,
+            hostinger_summary_url=settings.hostinger_summary_url,
+            hostinger_components_url=settings.hostinger_components_url,
+            hostinger_incidents_url=settings.hostinger_incidents_url,
+            hostinger_status_page_url=settings.hostinger_status_page_url,
         )
         tzinfo = _resolve_timezone(settings.host_report_timezone)
         lines = ["<b>Host Monitoring</b>"]
@@ -49,6 +55,8 @@ class StatusHostAutomation:
             self._format_locaweb(snapshot.locaweb, tzinfo),
             self._format_meta(snapshot.meta, tzinfo),
             self._format_umbrella(snapshot.umbrella, tzinfo),
+            self._format_hostinger(snapshot.hostinger, tzinfo),
+            self._format_websites(snapshot.websites),
         ]
         for section in sections:
             if not section:
@@ -58,7 +66,7 @@ class StatusHostAutomation:
         return AutomationResult(
             title="Host",
             message="\n".join(lines).strip(),
-            source_label="Locaweb | Meta | Cisco Umbrella",
+            source_label="Locaweb | Meta | Cisco Umbrella | Hostinger | Site Checks",
             generated_at=context.utc_now().astimezone(timezone.utc),
             ok=True,
         )
@@ -89,6 +97,46 @@ class StatusHostAutomation:
         lines.extend(
             self._format_incidents("Incidentes de hoje", report.incidents_today, tzinfo)
         )
+        return lines
+
+    def _format_hostinger(
+        self, report: HostingerReport, tzinfo: timezone | ZoneInfo
+    ) -> list[str]:
+        lines = ["<b>Hostinger</b>"]
+        if report.error:
+            lines.append(f"Falha ao consultar fonte: {html.escape(report.error)}")
+            return lines
+
+        if report.overall_ok:
+            lines.append("Saude: OK")
+            if report.mode == "fallback_page":
+                lines.append("- Fonte: fallback de pagina")
+            return lines
+
+        lines.append("Saude: ALERTA")
+        for component, status in report.components_non_operational.items():
+            lines.append(f"- {html.escape(component)}: {html.escape(status)}")
+        lines.extend(
+            self._format_incidents(
+                "Incidentes ativos/hoje (Hostinger)",
+                report.incidents_active_or_today,
+                tzinfo,
+                title_bold=True,
+                max_body_chars=170,
+            )
+        )
+        if report.mode == "fallback_page" and not report.incidents_active_or_today:
+            lines.append("- Fonte: fallback de pagina")
+        return lines
+
+    def _format_websites(self, report: WebsiteChecksReport) -> list[str]:
+        total = len(report.checks)
+        up_count = sum(1 for check in report.checks if check.is_up)
+        lines = ["<b>Sites Monitorados</b>", f"Sites OK: {up_count}/{total}"]
+        for check in report.checks:
+            if check.is_up:
+                continue
+            lines.append(f"- {html.escape(check.label)}: DOWN")
         return lines
 
     def _format_meta(self, report: MetaReport, tzinfo: timezone | ZoneInfo) -> list[str]:

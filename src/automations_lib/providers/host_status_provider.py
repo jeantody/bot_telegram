@@ -98,10 +98,35 @@ class UmbrellaReport:
 
 
 @dataclass(frozen=True)
+class HostingerReport:
+    overall_ok: bool
+    components_non_operational: dict[str, str]
+    incidents_active_or_today: list[HostIncident]
+    mode: str
+    error: str | None
+
+
+@dataclass(frozen=True)
+class WebsiteCheckResult:
+    label: str
+    url: str
+    is_up: bool
+    final_status_code: int | None
+    error: str | None
+
+
+@dataclass(frozen=True)
+class WebsiteChecksReport:
+    checks: list[WebsiteCheckResult]
+
+
+@dataclass(frozen=True)
 class HostSnapshot:
     locaweb: LocawebReport
     meta: MetaReport
     umbrella: UmbrellaReport
+    hostinger: HostingerReport
+    websites: WebsiteChecksReport
 
 
 class HostStatusProvider:
@@ -118,6 +143,19 @@ class HostStatusProvider:
         "partial_outage": "Instavel",
         "major_outage": "Fora do ar",
     }
+    SITE_TARGETS = [
+        ("MV", "https://private-site-01.example/"),
+        ("Melior", "https://private-site-02.example/"),
+        ("Collis", "https://private-site-03.example/"),
+        ("VoipRogini", "https://private-site-04.example/"),
+        ("Voip Pet/Sind", "https://private-site-05.example:4433/"),
+        ("Chat Rogini", "https://private-site-06.example/app/login"),
+        ("Chat Accbook", "https://private-site-07.example/app/login"),
+        ("QPanel", "http://private-site-08.example:5001/"),
+        ("Resultado", "http://private-site-09.example"),
+        ("Echo", "https://private-site-10.example/ui/"),
+        ("Node accb", "https://private-site-11.example/signin?redirect=%252F"),
+    ]
 
     def __init__(self, timeout_seconds: int, report_timezone: str) -> None:
         self._timeout_seconds = timeout_seconds
@@ -132,19 +170,42 @@ class HostStatusProvider:
         meta_metrics_url_template: str,
         umbrella_summary_url: str,
         umbrella_incidents_url: str,
+        hostinger_summary_url: str,
+        hostinger_components_url: str,
+        hostinger_incidents_url: str,
+        hostinger_status_page_url: str,
     ) -> HostSnapshot:
         locaweb_task = self._fetch_locaweb(locaweb_components_url, locaweb_incidents_url)
         meta_task = self._fetch_meta(
             meta_orgs_url, meta_outages_url_template, meta_metrics_url_template
         )
         umbrella_task = self._fetch_umbrella(umbrella_summary_url, umbrella_incidents_url)
-        locaweb_report, meta_report, umbrella_report = await asyncio.gather(
-            locaweb_task, meta_task, umbrella_task
+        hostinger_task = self._fetch_hostinger(
+            hostinger_summary_url=hostinger_summary_url,
+            hostinger_components_url=hostinger_components_url,
+            hostinger_incidents_url=hostinger_incidents_url,
+            hostinger_status_page_url=hostinger_status_page_url,
+        )
+        websites_task = self._fetch_websites()
+        (
+            locaweb_report,
+            meta_report,
+            umbrella_report,
+            hostinger_report,
+            websites_report,
+        ) = await asyncio.gather(
+            locaweb_task,
+            meta_task,
+            umbrella_task,
+            hostinger_task,
+            websites_task,
         )
         return HostSnapshot(
             locaweb=locaweb_report,
             meta=meta_report,
             umbrella=umbrella_report,
+            hostinger=hostinger_report,
+            websites=websites_report,
         )
 
     async def _fetch_locaweb(
@@ -382,6 +443,167 @@ class HostStatusProvider:
             reverse=True,
         )
         return selected
+
+    async def _fetch_hostinger(
+        self,
+        hostinger_summary_url: str,
+        hostinger_components_url: str,
+        hostinger_incidents_url: str,
+        hostinger_status_page_url: str,
+    ) -> HostingerReport:
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout_seconds,
+                follow_redirects=True,
+                verify=False,
+            ) as client:
+                summary_resp, components_resp, incidents_resp = await asyncio.gather(
+                    client.get(hostinger_summary_url),
+                    client.get(hostinger_components_url),
+                    client.get(hostinger_incidents_url),
+                )
+            summary_resp.raise_for_status()
+            components_resp.raise_for_status()
+            incidents_resp.raise_for_status()
+            summary_payload = summary_resp.json()
+            components_payload = components_resp.json()
+            incidents_payload = incidents_resp.json()
+            if not isinstance(summary_payload, dict):
+                raise ValueError("summary payload invalido")
+            if not isinstance(components_payload, dict):
+                raise ValueError("components payload invalido")
+            if not isinstance(incidents_payload, dict):
+                raise ValueError("incidents payload invalido")
+        except Exception:
+            return await self._fetch_hostinger_fallback(hostinger_status_page_url)
+
+        components_non_operational: dict[str, str] = {}
+        for component in components_payload.get("components", []):
+            name = str(component.get("name", "")).strip()
+            status = str(component.get("status", "")).strip().lower()
+            if not name:
+                continue
+            if status != "operational":
+                components_non_operational[name] = status or "unknown"
+
+        incidents = self._statuspage_incidents_active_or_today(incidents_payload)
+        overall_ok = len(components_non_operational) == 0 and len(incidents) == 0
+        return HostingerReport(
+            overall_ok=overall_ok,
+            components_non_operational=components_non_operational,
+            incidents_active_or_today=incidents,
+            mode="api",
+            error=None,
+        )
+
+    async def _fetch_hostinger_fallback(self, status_page_url: str) -> HostingerReport:
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout_seconds,
+                follow_redirects=True,
+                verify=False,
+            ) as client:
+                response = await client.get(status_page_url)
+            response.raise_for_status()
+            if response.status_code != 200:
+                raise RuntimeError(f"status HTTP {response.status_code}")
+            return HostingerReport(
+                overall_ok=True,
+                components_non_operational={},
+                incidents_active_or_today=[],
+                mode="fallback_page",
+                error=None,
+            )
+        except Exception as exc:
+            return HostingerReport(
+                overall_ok=False,
+                components_non_operational={},
+                incidents_active_or_today=[],
+                mode="fallback_page",
+                error=f"Falha ao consultar Hostinger: {exc}",
+            )
+
+    def _statuspage_incidents_active_or_today(self, payload: dict) -> list[HostIncident]:
+        incidents = payload.get("incidents", [])
+        selected: dict[str, HostIncident] = {}
+        for incident in incidents:
+            status = str(incident.get("status", "")).strip()
+            created = _parse_dt(incident.get("created_at"))
+            started = _parse_dt(incident.get("started_at"))
+            active = status not in {"resolved", "completed"}
+            today = _is_today_in_timezone(created, self._report_tz) or _is_today_in_timezone(
+                started, self._report_tz
+            )
+            if not (active or today):
+                continue
+
+            updates = [
+                HostIncidentUpdate(
+                    status=_title_case_status(str(update.get("status", ""))),
+                    body=str(update.get("body", "")).strip(),
+                    display_at=_parse_dt(update.get("display_at")),
+                )
+                for update in incident.get("incident_updates", [])
+            ]
+            updates.sort(
+                key=lambda item: item.display_at
+                or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True,
+            )
+            entry = HostIncident(
+                source_id=str(incident.get("id", "")),
+                title=str(incident.get("name", "")).strip(),
+                status=_title_case_status(status),
+                started_at=started,
+                updates=updates,
+            )
+            selected[entry.source_id] = entry
+
+        values = list(selected.values())
+        values.sort(
+            key=lambda item: item.started_at or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        return values
+
+    async def _fetch_websites(self) -> WebsiteChecksReport:
+        async with httpx.AsyncClient(
+            timeout=self._timeout_seconds,
+            follow_redirects=True,
+            verify=False,
+        ) as client:
+            checks = await asyncio.gather(
+                *(
+                    self._check_single_website(client=client, label=label, url=url)
+                    for label, url in self.SITE_TARGETS
+                )
+            )
+        return WebsiteChecksReport(checks=checks)
+
+    async def _check_single_website(
+        self,
+        client: httpx.AsyncClient,
+        label: str,
+        url: str,
+    ) -> WebsiteCheckResult:
+        try:
+            response = await client.get(url)
+            status_code = int(response.status_code)
+            return WebsiteCheckResult(
+                label=label,
+                url=url,
+                is_up=status_code == 200,
+                final_status_code=status_code,
+                error=None if status_code == 200 else f"HTTP {status_code}",
+            )
+        except Exception as exc:
+            return WebsiteCheckResult(
+                label=label,
+                url=url,
+                is_up=False,
+                final_status_code=None,
+                error=str(exc),
+            )
 
     async def _fetch_umbrella(
         self,

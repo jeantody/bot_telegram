@@ -44,6 +44,10 @@ def build_context() -> AutomationContext:
             meta_metrics_url_template="https://metastatus.com/metrics/{org}/{metric}.json",
             umbrella_summary_url="https://status.umbrella.com/api/v2/summary.json",
             umbrella_incidents_url="https://status.umbrella.com/api/v2/incidents.json",
+            hostinger_summary_url="https://statuspage.hostinger.com/api/v2/summary.json",
+            hostinger_components_url="https://statuspage.hostinger.com/api/v2/components.json",
+            hostinger_incidents_url="https://statuspage.hostinger.com/api/v2/incidents.json",
+            hostinger_status_page_url="https://statuspage.hostinger.com/",
             host_report_timezone="America/Sao_Paulo",
         )
     )

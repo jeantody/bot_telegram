@@ -7,6 +7,7 @@ import pytest
 from src.automations_lib.automations.status_host import StatusHostAutomation
 from src.automations_lib.models import AutomationContext
 from src.automations_lib.providers.host_status_provider import (
+    HostingerReport,
     HostIncident,
     HostIncidentUpdate,
     HostSnapshot,
@@ -14,6 +15,8 @@ from src.automations_lib.providers.host_status_provider import (
     MetaOrgReport,
     MetaReport,
     UmbrellaReport,
+    WebsiteCheckResult,
+    WebsiteChecksReport,
 )
 from src.config import Settings
 
@@ -31,6 +34,10 @@ class FakeProvider:
         meta_metrics_url_template: str,
         umbrella_summary_url: str,
         umbrella_incidents_url: str,
+        hostinger_summary_url: str,
+        hostinger_components_url: str,
+        hostinger_incidents_url: str,
+        hostinger_status_page_url: str,
     ) -> HostSnapshot:
         del (
             locaweb_components_url,
@@ -40,6 +47,10 @@ class FakeProvider:
             meta_metrics_url_template,
             umbrella_summary_url,
             umbrella_incidents_url,
+            hostinger_summary_url,
+            hostinger_components_url,
+            hostinger_incidents_url,
+            hostinger_status_page_url,
         )
         return self.snapshot
 
@@ -69,6 +80,10 @@ def build_context() -> AutomationContext:
             meta_metrics_url_template="https://metastatus.com/metrics/{org}/{metric}.json",
             umbrella_summary_url="https://status.umbrella.com/api/v2/summary.json",
             umbrella_incidents_url="https://status.umbrella.com/api/v2/incidents.json",
+            hostinger_summary_url="https://statuspage.hostinger.com/api/v2/summary.json",
+            hostinger_components_url="https://statuspage.hostinger.com/api/v2/components.json",
+            hostinger_incidents_url="https://statuspage.hostinger.com/api/v2/incidents.json",
+            hostinger_status_page_url="https://statuspage.hostinger.com/",
             host_report_timezone="America/Sao_Paulo",
         )
     )
@@ -143,6 +158,31 @@ async def test_status_host_formats_consolidated_report() -> None:
                     incidents_active_or_today=[umbrella_incident],
                     error=None,
                 ),
+                hostinger=HostingerReport(
+                    overall_ok=True,
+                    components_non_operational={},
+                    incidents_active_or_today=[],
+                    mode="api",
+                    error=None,
+                ),
+                websites=WebsiteChecksReport(
+                    checks=[
+                        WebsiteCheckResult(
+                            label="MV",
+                            url="https://private-site-01.example/",
+                            is_up=True,
+                            final_status_code=200,
+                            error=None,
+                        ),
+                        WebsiteCheckResult(
+                            label="Chat Accbook",
+                            url="https://private-site-07.example/app/login",
+                            is_up=False,
+                            final_status_code=502,
+                            error="HTTP 502",
+                        ),
+                    ]
+                ),
             )
         )
     )
@@ -153,6 +193,8 @@ async def test_status_host_formats_consolidated_report() -> None:
     assert "<b>Locaweb</b>" in result.message
     assert "<b>Meta</b>" in result.message
     assert "<b>Cisco Umbrella</b>" in result.message
+    assert "<b>Hostinger</b>" in result.message
+    assert "<b>Sites Monitorados</b>" in result.message
     assert "WhatsApp Availability: 99.98%" in result.message
     assert "P90 1397 ms, P99 2891 ms (last 31 days)" in result.message
     assert "Meta Admin Center" not in result.message
@@ -166,6 +208,9 @@ async def test_status_host_formats_consolidated_report() -> None:
     assert "applied promptly after configuration" not in result.message
     assert "policies are being delivered efficiently." not in result.message
     assert "Incidentes de hoje" in result.message
+    assert "Sites OK: 1/2" in result.message
+    assert "- Chat Accbook: DOWN" in result.message
+    assert "HTTP 502" not in result.message
 
 
 @pytest.mark.asyncio
@@ -194,6 +239,24 @@ async def test_status_host_hides_incident_sections_when_empty() -> None:
                     incidents_active_or_today=[],
                     error=None,
                 ),
+                hostinger=HostingerReport(
+                    overall_ok=True,
+                    components_non_operational={},
+                    incidents_active_or_today=[],
+                    mode="api",
+                    error=None,
+                ),
+                websites=WebsiteChecksReport(
+                    checks=[
+                        WebsiteCheckResult(
+                            label="MV",
+                            url="https://private-site-01.example/",
+                            is_up=True,
+                            final_status_code=200,
+                            error=None,
+                        )
+                    ]
+                ),
             )
         )
     )
@@ -204,5 +267,8 @@ async def test_status_host_hides_incident_sections_when_empty() -> None:
     assert "<b>Locaweb</b>" in result.message
     assert "Saude: OK" in result.message
     assert "<b>Cisco Umbrella</b>" not in result.message
+    assert "<b>Hostinger</b>" in result.message
+    assert "<b>Sites Monitorados</b>" in result.message
+    assert "Sites OK: 1/1" in result.message
     assert "Incidentes de hoje" not in result.message
     assert "Incidentes ativos/hoje" not in result.message
