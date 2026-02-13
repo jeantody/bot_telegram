@@ -8,6 +8,7 @@ from src.automations_lib.automations.status_host import StatusHostAutomation
 from src.automations_lib.models import AutomationContext
 from src.automations_lib.providers.host_status_provider import (
     HostingerReport,
+    HostMaintenance,
     HostIncident,
     HostIncidentUpdate,
     HostSnapshot,
@@ -19,6 +20,17 @@ from src.automations_lib.providers.host_status_provider import (
     WebsiteChecksReport,
 )
 from src.config import Settings
+
+
+@dataclass
+class FakeTranslationResult:
+    text: str
+
+
+class FakeTranslator:
+    def translate(self, text: str, dest: str = "pt") -> FakeTranslationResult:
+        del dest
+        return FakeTranslationResult(text=f"PT::{text}")
 
 
 @dataclass
@@ -159,10 +171,16 @@ async def test_status_host_formats_consolidated_report() -> None:
                     error=None,
                 ),
                 hostinger=HostingerReport(
-                    overall_ok=True,
-                    components_non_operational={},
-                    incidents_active_or_today=[],
-                    mode="api",
+                    overall_ok=False,
+                    vps_components_non_operational={"VPS node": "major_outage"},
+                    incidents_active_recent=[short_incident],
+                    upcoming_maintenances=[
+                        HostMaintenance(
+                            name="Window maintenance",
+                            scheduled_for=None,
+                            scheduled_until=None,
+                        )
+                    ],
                     error=None,
                 ),
                 websites=WebsiteChecksReport(
@@ -184,7 +202,8 @@ async def test_status_host_formats_consolidated_report() -> None:
                     ]
                 ),
             )
-        )
+        ),
+        translator=FakeTranslator(),
     )
 
     result = await automation.run(build_context())
@@ -192,25 +211,23 @@ async def test_status_host_formats_consolidated_report() -> None:
     assert result.ok is True
     assert "<b>Locaweb</b>" in result.message
     assert "<b>Meta</b>" in result.message
-    assert "<b>Cisco Umbrella</b>" in result.message
     assert "<b>Hostinger</b>" in result.message
     assert "<b>Sites Monitorados</b>" in result.message
+    assert "<b>PT::Cisco Umbrella</b>" in result.message
     assert "WhatsApp Availability: 99.98%" in result.message
     assert "P90 1397 ms, P99 2891 ms (last 31 days)" in result.message
     assert "Meta Admin Center" not in result.message
     assert "Umbrella Global: Normal (operational)" not in result.message
-    assert "<b>Incidentes ativos/hoje</b>" in result.message
-    assert (
-        "All policy files have now been processed and the queue is clear."
-        in result.message
-    )
-    assert "Policy generation is functioning as expected" in result.message
-    assert "applied promptly after configuration" not in result.message
-    assert "policies are being delivered efficiently." not in result.message
+    assert "<b>PT::Incidentes ativos/hoje</b>" in result.message
+    assert "PT::All policy files have now been processed" in result.message
     assert "Incidentes de hoje" in result.message
     assert "Sites OK: 1/2" in result.message
     assert "- Chat Accbook: DOWN" in result.message
     assert "HTTP 502" not in result.message
+    assert "- VPS node: major_outage" in result.message
+    assert "<b>Manutencoes futuras</b>" in result.message
+    assert "Window maintenance" in result.message
+    assert result.message.rfind("Cisco") > result.message.rfind("Sites Monitorados")
 
 
 @pytest.mark.asyncio
@@ -241,9 +258,9 @@ async def test_status_host_hides_incident_sections_when_empty() -> None:
                 ),
                 hostinger=HostingerReport(
                     overall_ok=True,
-                    components_non_operational={},
-                    incidents_active_or_today=[],
-                    mode="api",
+                    vps_components_non_operational={},
+                    incidents_active_recent=[],
+                    upcoming_maintenances=[],
                     error=None,
                 ),
                 websites=WebsiteChecksReport(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 
 from src.automations_lib.providers.host_status_provider import HostStatusProvider
@@ -32,7 +33,8 @@ class FakeAsyncClient:
         del exc_type, exc, tb
         return False
 
-    async def get(self, url: str):
+    async def get(self, url: str, **kwargs):
+        del kwargs
         if url not in self._responses:
             raise RuntimeError(f"unexpected url: {url}")
         item = self._responses[url]
@@ -41,10 +43,11 @@ class FakeAsyncClient:
         return item
 
 
-def _build_today_iso(hour: int, minute: int) -> str:
+def _build_day_offset_iso(day_offset: int, hour: int, minute: int) -> str:
     sao_paulo = timezone(timedelta(hours=-3))
     now = datetime.now(sao_paulo)
-    return now.replace(hour=hour, minute=minute, second=0, microsecond=0).isoformat()
+    target = now + timedelta(days=day_offset)
+    return target.replace(hour=hour, minute=minute, second=0, microsecond=0).isoformat()
 
 
 @pytest.mark.asyncio
@@ -61,7 +64,11 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
     hostinger_incidents_url = "https://statuspage.hostinger.com/api/v2/incidents.json"
     hostinger_status_page_url = "https://statuspage.hostinger.com/"
 
-    now_iso = _build_today_iso(10, 15)
+    now_iso = _build_day_offset_iso(0, 10, 15)
+    yesterday_iso = _build_day_offset_iso(-1, 9, 10)
+    two_days_ago_iso = _build_day_offset_iso(-2, 8, 0)
+    tomorrow_iso = _build_day_offset_iso(1, 22, 0)
+    tomorrow_end_iso = _build_day_offset_iso(2, 2, 0)
     responses = {
         locaweb_components_url: FakeResponse(
             {
@@ -147,12 +154,67 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
                 ]
             }
         ),
-        hostinger_summary_url: FakeResponse({"status": {"indicator": "none"}}),
-        hostinger_components_url: FakeResponse(
-            {"components": [{"name": "Global API", "status": "operational"}]}
+        hostinger_summary_url: FakeResponse(
+            {
+                "components": [
+                    {"name": "VPS BR-01", "status": "operational"},
+                    {"name": "pve-node-22", "status": "major_outage"},
+                    {"name": "Shared Hosting", "status": "degraded_performance"},
+                ],
+                "incidents": [
+                    {
+                        "id": "h1",
+                        "name": "Hostinger incident major",
+                        "status": "investigating",
+                        "impact": "major",
+                        "created_at": now_iso,
+                        "started_at": now_iso,
+                        "incident_updates": [],
+                    },
+                    {
+                        "id": "h2",
+                        "name": "Hostinger incident yesterday",
+                        "status": "resolved",
+                        "impact": "minor",
+                        "created_at": yesterday_iso,
+                        "started_at": yesterday_iso,
+                        "incident_updates": [],
+                    },
+                    {
+                        "id": "h3",
+                        "name": "Hostinger incident none",
+                        "status": "resolved",
+                        "impact": "none",
+                        "created_at": now_iso,
+                        "started_at": now_iso,
+                        "incident_updates": [],
+                    },
+                    {
+                        "id": "h4",
+                        "name": "Hostinger incident old",
+                        "status": "resolved",
+                        "impact": "critical",
+                        "created_at": two_days_ago_iso,
+                        "started_at": two_days_ago_iso,
+                        "incident_updates": [],
+                    },
+                ],
+                "scheduled_maintenances": [
+                    {
+                        "id": "m1",
+                        "name": "Maintenance future",
+                        "scheduled_for": tomorrow_iso,
+                        "scheduled_until": tomorrow_end_iso,
+                    },
+                    {
+                        "id": "m2",
+                        "name": "Maintenance past",
+                        "scheduled_for": two_days_ago_iso,
+                        "scheduled_until": yesterday_iso,
+                    },
+                ],
+            }
         ),
-        hostinger_incidents_url: FakeResponse({"incidents": []}),
-        hostinger_status_page_url: FakeResponse("<html></html>"),
         "https://private-site-01.example/": FakeResponse({}, status_code=200),
         "https://private-site-02.example/": FakeResponse({}, status_code=200),
         "https://private-site-03.example/": FakeResponse({}, status_code=200),
@@ -197,8 +259,11 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
     assert snapshot.umbrella.error is None
     assert snapshot.umbrella.component_statuses_human["Umbrella South America"] == "Lento"
     assert len(snapshot.umbrella.incidents_active_or_today) == 1
-    assert snapshot.hostinger.mode == "api"
-    assert snapshot.hostinger.overall_ok is True
+    assert snapshot.hostinger.overall_ok is False
+    assert "pve-node-22" in snapshot.hostinger.vps_components_non_operational
+    assert "VPS BR-01" not in snapshot.hostinger.vps_components_non_operational
+    assert len(snapshot.hostinger.incidents_active_recent) == 2
+    assert len(snapshot.hostinger.upcoming_maintenances) == 1
     assert len(snapshot.websites.checks) == 11
     chat_accbook = next(
         item for item in snapshot.websites.checks if item.label == "Chat Accbook"
@@ -239,10 +304,7 @@ async def test_fetch_snapshot_keeps_partial_output_when_one_source_fails(monkeyp
         ): FakeResponse({"values": []}),
         umbrella_summary_url: FakeResponse({"components": []}),
         umbrella_incidents_url: FakeResponse({"incidents": []}),
-        hostinger_summary_url: RuntimeError("blocked"),
-        hostinger_components_url: RuntimeError("blocked"),
-        hostinger_incidents_url: RuntimeError("blocked"),
-        hostinger_status_page_url: FakeResponse({}, status_code=200),
+        hostinger_summary_url: httpx.ReadTimeout("timeout"),
         "https://private-site-01.example/": FakeResponse({}, status_code=200),
         "https://private-site-02.example/": FakeResponse({}, status_code=200),
         "https://private-site-03.example/": FakeResponse({}, status_code=200),
@@ -279,8 +341,57 @@ async def test_fetch_snapshot_keeps_partial_output_when_one_source_fails(monkeyp
     assert snapshot.locaweb.error is not None
     assert snapshot.meta.error is None
     assert snapshot.umbrella.error is None
-    assert snapshot.hostinger.mode == "fallback_page"
-    assert snapshot.hostinger.overall_ok is True
+    assert snapshot.hostinger.overall_ok is False
+    assert snapshot.hostinger.error is not None
+
+
+@pytest.mark.asyncio
+async def test_hostinger_http_error_is_handled(monkeypatch) -> None:
+    responses = {
+        "https://statuspage.hostinger.com/api/v2/summary.json": httpx.HTTPError(
+            "http 403"
+        ),
+        "https://private-site-01.example/": FakeResponse({}, status_code=200),
+        "https://private-site-02.example/": FakeResponse({}, status_code=200),
+        "https://private-site-03.example/": FakeResponse({}, status_code=200),
+        "https://private-site-04.example/": FakeResponse({}, status_code=200),
+        "https://private-site-05.example:4433/": FakeResponse({}, status_code=200),
+        "https://private-site-06.example/app/login": FakeResponse({}, status_code=200),
+        "https://private-site-07.example/app/login": FakeResponse({}, status_code=200),
+        "http://private-site-08.example:5001/": FakeResponse({}, status_code=200),
+        "http://private-site-09.example": FakeResponse({}, status_code=200),
+        "https://private-site-10.example/ui/": FakeResponse({}, status_code=200),
+        "https://private-site-11.example/signin?redirect=%252F": FakeResponse({}, status_code=200),
+        "https://statusblog.locaweb.com.br/api/v2/components.json": FakeResponse({"components": []}),
+        "https://statusblog.locaweb.com.br/api/v2/incidents.json": FakeResponse({"incidents": []}),
+        "https://metastatus.com/data/orgs.json": FakeResponse([]),
+        "https://metastatus.com/data/outages/whatsapp-business-api.history.json": FakeResponse([]),
+        "https://metastatus.com/metrics/whatsapp-business-api/cloudapi_uptime_daily.json": FakeResponse({"values": []}),
+        "https://metastatus.com/metrics/whatsapp-business-api/event_tagging_latency_last_31_days_p90_s3.json": FakeResponse({"values": []}),
+        "https://metastatus.com/metrics/whatsapp-business-api/event_tagging_latency_last_31_days_p99_s3.json": FakeResponse({"values": []}),
+        "https://status.umbrella.com/api/v2/summary.json": FakeResponse({"components": []}),
+        "https://status.umbrella.com/api/v2/incidents.json": FakeResponse({"incidents": []}),
+    }
+    monkeypatch.setattr(
+        "src.automations_lib.providers.host_status_provider.httpx.AsyncClient",
+        lambda **kwargs: FakeAsyncClient(responses, **kwargs),
+    )
+    provider = HostStatusProvider(timeout_seconds=10, report_timezone="America/Sao_Paulo")
+    snapshot = await provider.fetch_snapshot(
+        locaweb_components_url="https://statusblog.locaweb.com.br/api/v2/components.json",
+        locaweb_incidents_url="https://statusblog.locaweb.com.br/api/v2/incidents.json",
+        meta_orgs_url="https://metastatus.com/data/orgs.json",
+        meta_outages_url_template="https://metastatus.com/data/outages/{org}.history.json",
+        meta_metrics_url_template="https://metastatus.com/metrics/{org}/{metric}.json",
+        umbrella_summary_url="https://status.umbrella.com/api/v2/summary.json",
+        umbrella_incidents_url="https://status.umbrella.com/api/v2/incidents.json",
+        hostinger_summary_url="https://statuspage.hostinger.com/api/v2/summary.json",
+        hostinger_components_url="https://statuspage.hostinger.com/api/v2/components.json",
+        hostinger_incidents_url="https://statuspage.hostinger.com/api/v2/incidents.json",
+        hostinger_status_page_url="https://statuspage.hostinger.com/",
+    )
+    assert snapshot.hostinger.overall_ok is False
+    assert "Falha ao consultar Hostinger" in (snapshot.hostinger.error or "")
 
 
 @pytest.mark.asyncio

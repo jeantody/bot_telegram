@@ -40,6 +40,16 @@ def _is_today_in_timezone(dt: datetime | None, tzinfo: timezone | ZoneInfo) -> b
     return dt.astimezone(tzinfo).date() == datetime.now(tzinfo).date()
 
 
+def _is_today_or_yesterday_in_timezone(
+    dt: datetime | None, tzinfo: timezone | ZoneInfo
+) -> bool:
+    if dt is None:
+        return False
+    current_date = datetime.now(tzinfo).date()
+    candidate = dt.astimezone(tzinfo).date()
+    return candidate in {current_date, current_date - timedelta(days=1)}
+
+
 def _title_case_status(status: str) -> str:
     if not status:
         return "Unknown"
@@ -100,10 +110,17 @@ class UmbrellaReport:
 @dataclass(frozen=True)
 class HostingerReport:
     overall_ok: bool
-    components_non_operational: dict[str, str]
-    incidents_active_or_today: list[HostIncident]
-    mode: str
+    vps_components_non_operational: dict[str, str]
+    incidents_active_recent: list[HostIncident]
+    upcoming_maintenances: list["HostMaintenance"]
     error: str | None
+
+
+@dataclass(frozen=True)
+class HostMaintenance:
+    name: str
+    scheduled_for: datetime | None
+    scheduled_until: datetime | None
 
 
 @dataclass(frozen=True)
@@ -451,90 +468,82 @@ class HostStatusProvider:
         hostinger_incidents_url: str,
         hostinger_status_page_url: str,
     ) -> HostingerReport:
+        del hostinger_components_url, hostinger_incidents_url, hostinger_status_page_url
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout_seconds,
                 follow_redirects=True,
                 verify=False,
             ) as client:
-                summary_resp, components_resp, incidents_resp = await asyncio.gather(
-                    client.get(hostinger_summary_url),
-                    client.get(hostinger_components_url),
-                    client.get(hostinger_incidents_url),
+                summary_resp = await client.get(
+                    hostinger_summary_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept": "application/json",
+                    },
                 )
             summary_resp.raise_for_status()
-            components_resp.raise_for_status()
-            incidents_resp.raise_for_status()
             summary_payload = summary_resp.json()
-            components_payload = components_resp.json()
-            incidents_payload = incidents_resp.json()
             if not isinstance(summary_payload, dict):
                 raise ValueError("summary payload invalido")
-            if not isinstance(components_payload, dict):
-                raise ValueError("components payload invalido")
-            if not isinstance(incidents_payload, dict):
-                raise ValueError("incidents payload invalido")
-        except Exception:
-            return await self._fetch_hostinger_fallback(hostinger_status_page_url)
-
-        components_non_operational: dict[str, str] = {}
-        for component in components_payload.get("components", []):
-            name = str(component.get("name", "")).strip()
-            status = str(component.get("status", "")).strip().lower()
-            if not name:
-                continue
-            if status != "operational":
-                components_non_operational[name] = status or "unknown"
-
-        incidents = self._statuspage_incidents_active_or_today(incidents_payload)
-        overall_ok = len(components_non_operational) == 0 and len(incidents) == 0
-        return HostingerReport(
-            overall_ok=overall_ok,
-            components_non_operational=components_non_operational,
-            incidents_active_or_today=incidents,
-            mode="api",
-            error=None,
-        )
-
-    async def _fetch_hostinger_fallback(self, status_page_url: str) -> HostingerReport:
-        try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout_seconds,
-                follow_redirects=True,
-                verify=False,
-            ) as client:
-                response = await client.get(status_page_url)
-            response.raise_for_status()
-            if response.status_code != 200:
-                raise RuntimeError(f"status HTTP {response.status_code}")
+        except httpx.TimeoutException as exc:
             return HostingerReport(
-                overall_ok=True,
-                components_non_operational={},
-                incidents_active_or_today=[],
-                mode="fallback_page",
-                error=None,
+                overall_ok=False,
+                vps_components_non_operational={},
+                incidents_active_recent=[],
+                upcoming_maintenances=[],
+                error=f"Falha ao consultar Hostinger (timeout): {exc}",
+            )
+        except httpx.HTTPError as exc:
+            return HostingerReport(
+                overall_ok=False,
+                vps_components_non_operational={},
+                incidents_active_recent=[],
+                upcoming_maintenances=[],
+                error=f"Falha ao consultar Hostinger (HTTP): {exc}",
             )
         except Exception as exc:
             return HostingerReport(
                 overall_ok=False,
-                components_non_operational={},
-                incidents_active_or_today=[],
-                mode="fallback_page",
+                vps_components_non_operational={},
+                incidents_active_recent=[],
+                upcoming_maintenances=[],
                 error=f"Falha ao consultar Hostinger: {exc}",
             )
 
-    def _statuspage_incidents_active_or_today(self, payload: dict) -> list[HostIncident]:
-        incidents = payload.get("incidents", [])
+        vps_components = self._hostinger_vps_components_non_operational(
+            summary_payload.get("components", [])
+        )
+        incidents = self._hostinger_recent_incidents_with_impact(
+            summary_payload.get("incidents", [])
+        )
+        maintenances = self._hostinger_upcoming_maintenances(
+            summary_payload.get("scheduled_maintenances", [])
+        )
+        overall_ok = len(vps_components) == 0 and len(incidents) == 0
+        return HostingerReport(
+            overall_ok=overall_ok,
+            vps_components_non_operational=vps_components,
+            incidents_active_recent=incidents,
+            upcoming_maintenances=maintenances,
+            error=None,
+        )
+
+    def _hostinger_recent_incidents_with_impact(
+        self, incidents: list[dict]
+    ) -> list[HostIncident]:
         selected: dict[str, HostIncident] = {}
         for incident in incidents:
             status = str(incident.get("status", "")).strip()
             created = _parse_dt(incident.get("created_at"))
             started = _parse_dt(incident.get("started_at"))
-            active = status not in {"resolved", "completed"}
-            today = _is_today_in_timezone(created, self._report_tz) or _is_today_in_timezone(
-                started, self._report_tz
-            )
-            if not (active or today):
+            impact = str(incident.get("impact", "")).strip().lower()
+            recent = _is_today_or_yesterday_in_timezone(
+                created, self._report_tz
+            ) or _is_today_or_yesterday_in_timezone(started, self._report_tz)
+            if not recent:
+                continue
+            if impact == "none":
                 continue
 
             updates = [
@@ -550,8 +559,13 @@ class HostStatusProvider:
                 or datetime.min.replace(tzinfo=timezone.utc),
                 reverse=True,
             )
+            source_id = str(incident.get("id", "")).strip()
+            if not source_id:
+                source_id = (
+                    f"{str(incident.get('name', '')).strip()}-{started}-{created}"
+                )
             entry = HostIncident(
-                source_id=str(incident.get("id", "")),
+                source_id=source_id,
                 title=str(incident.get("name", "")).strip(),
                 status=_title_case_status(status),
                 started_at=started,
@@ -565,6 +579,46 @@ class HostStatusProvider:
             reverse=True,
         )
         return values
+
+    def _hostinger_vps_components_non_operational(
+        self, components: list[dict]
+    ) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for component in components:
+            name = str(component.get("name", "")).strip()
+            if not name:
+                continue
+            lowered = name.lower()
+            if "vps" not in lowered and "pve-node" not in lowered:
+                continue
+            status = str(component.get("status", "")).strip().lower()
+            if status == "operational":
+                continue
+            result[name] = status or "unknown"
+        return result
+
+    def _hostinger_upcoming_maintenances(
+        self, maintenances: list[dict]
+    ) -> list[HostMaintenance]:
+        now = datetime.now(self._report_tz)
+        result: list[HostMaintenance] = []
+        for maintenance in maintenances:
+            scheduled_for = _parse_dt(maintenance.get("scheduled_for"))
+            if scheduled_for is None:
+                continue
+            if scheduled_for.astimezone(self._report_tz) <= now:
+                continue
+            result.append(
+                HostMaintenance(
+                    name=str(maintenance.get("name", "")).strip(),
+                    scheduled_for=scheduled_for,
+                    scheduled_until=_parse_dt(maintenance.get("scheduled_until")),
+                )
+            )
+        result.sort(
+            key=lambda item: item.scheduled_for or datetime.max.replace(tzinfo=timezone.utc)
+        )
+        return result
 
     async def _fetch_websites(self) -> WebsiteChecksReport:
         async with httpx.AsyncClient(

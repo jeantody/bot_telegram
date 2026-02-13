@@ -3,6 +3,7 @@ python-dotenv==1.1.1
 httpx==0.28.1
 feedparser==6.0.12
 beautifulsoup4==4.13.5
+googletrans==4.0.2
 tzdata==2025.2
 pytest==8.4.2
 pytest-asyncio==1.2.0
