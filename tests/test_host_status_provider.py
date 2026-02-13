@@ -8,6 +8,21 @@ import pytest
 from src.automations_lib.providers.host_status_provider import HostStatusProvider
 
 
+TEST_SITE_TARGETS: tuple[tuple[str, str], ...] = (
+    ("Site 01", "https://site01.test/"),
+    ("Site 02", "https://site02.test/"),
+    ("Site 03", "https://site03.test/"),
+    ("Site 04", "https://site04.test/"),
+    ("Site 05", "https://site05.test/"),
+    ("Site 06", "https://site06.test/login"),
+    ("Site 07", "https://site07.test/login"),
+    ("Site 08", "http://site08.test:5001/"),
+    ("Site 09", "http://site09.test"),
+    ("Site 10", "https://site10.test/ui/"),
+    ("Site 11", "https://site11.test/signin?redirect=%252F"),
+)
+
+
 class FakeResponse:
     def __init__(self, payload, status_code: int = 200) -> None:
         self._payload = payload
@@ -56,6 +71,10 @@ def _build_hours_offset_iso(hours: int) -> str:
     return target.replace(second=0, microsecond=0).isoformat()
 
 
+def _ok_site_responses() -> dict[str, object]:
+    return {url: FakeResponse({}, status_code=200) for _, url in TEST_SITE_TARGETS}
+
+
 @pytest.mark.asyncio
 async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> None:
     locaweb_components_url = "https://statusblog.locaweb.com.br/api/v2/components.json"
@@ -75,10 +94,10 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
     two_days_ago_iso = _build_day_offset_iso(-2, 8, 0)
     today_future_iso = _build_hours_offset_iso(2)
     today_future_end_iso = _build_hours_offset_iso(3)
-    tomorrow_iso = _build_hours_offset_iso(26)
-    tomorrow_end_iso = _build_hours_offset_iso(27)
-    after_tomorrow_iso = _build_hours_offset_iso(50)
-    after_tomorrow_end_iso = _build_hours_offset_iso(51)
+    tomorrow_iso = _build_day_offset_iso(1, 23, 0)
+    tomorrow_end_iso = _build_day_offset_iso(1, 23, 30)
+    after_tomorrow_iso = _build_day_offset_iso(2, 10, 0)
+    after_tomorrow_end_iso = _build_day_offset_iso(2, 11, 0)
     responses = {
         locaweb_components_url: FakeResponse(
             {
@@ -237,17 +256,8 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
                 ],
             }
         ),
-        "https://private-site-01.example/": FakeResponse({}, status_code=200),
-        "https://private-site-02.example/": FakeResponse({}, status_code=200),
-        "https://private-site-03.example/": FakeResponse({}, status_code=200),
-        "https://private-site-04.example/": FakeResponse({}, status_code=200),
-        "https://private-site-05.example:4433/": FakeResponse({}, status_code=200),
-        "https://private-site-06.example/app/login": FakeResponse({}, status_code=200),
-        "https://private-site-07.example/app/login": FakeResponse({}, status_code=502),
-        "http://private-site-08.example:5001/": FakeResponse({}, status_code=200),
-        "http://private-site-09.example": FakeResponse({}, status_code=200),
-        "https://private-site-10.example/ui/": FakeResponse({}, status_code=200),
-        "https://private-site-11.example/signin?redirect=%252F": FakeResponse({}, status_code=200),
+        **_ok_site_responses(),
+        "https://site07.test/login": FakeResponse({}, status_code=502),
     }
 
     monkeypatch.setattr(
@@ -255,7 +265,11 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
         lambda **kwargs: FakeAsyncClient(responses, **kwargs),
     )
 
-    provider = HostStatusProvider(timeout_seconds=10, report_timezone="America/Sao_Paulo")
+    provider = HostStatusProvider(
+        timeout_seconds=10,
+        report_timezone="America/Sao_Paulo",
+        site_targets=TEST_SITE_TARGETS,
+    )
     snapshot = await provider.fetch_snapshot(
         locaweb_components_url=locaweb_components_url,
         locaweb_incidents_url=locaweb_incidents_url,
@@ -291,10 +305,8 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
     assert "Maintenance future" in names
     assert "Maintenance after tomorrow" not in names
     assert len(snapshot.websites.checks) == 11
-    chat_accbook = next(
-        item for item in snapshot.websites.checks if item.label == "Chat Accbook"
-    )
-    assert chat_accbook.is_up is False
+    site07 = next(item for item in snapshot.websites.checks if item.label == "Site 07")
+    assert site07.is_up is False
 
 
 @pytest.mark.asyncio
@@ -331,17 +343,7 @@ async def test_fetch_snapshot_keeps_partial_output_when_one_source_fails(monkeyp
         umbrella_summary_url: FakeResponse({"components": []}),
         umbrella_incidents_url: FakeResponse({"incidents": []}),
         hostinger_summary_url: httpx.ReadTimeout("timeout"),
-        "https://private-site-01.example/": FakeResponse({}, status_code=200),
-        "https://private-site-02.example/": FakeResponse({}, status_code=200),
-        "https://private-site-03.example/": FakeResponse({}, status_code=200),
-        "https://private-site-04.example/": FakeResponse({}, status_code=200),
-        "https://private-site-05.example:4433/": FakeResponse({}, status_code=200),
-        "https://private-site-06.example/app/login": FakeResponse({}, status_code=200),
-        "https://private-site-07.example/app/login": FakeResponse({}, status_code=200),
-        "http://private-site-08.example:5001/": FakeResponse({}, status_code=200),
-        "http://private-site-09.example": FakeResponse({}, status_code=200),
-        "https://private-site-10.example/ui/": FakeResponse({}, status_code=200),
-        "https://private-site-11.example/signin?redirect=%252F": FakeResponse({}, status_code=200),
+        **_ok_site_responses(),
     }
 
     monkeypatch.setattr(
@@ -349,7 +351,11 @@ async def test_fetch_snapshot_keeps_partial_output_when_one_source_fails(monkeyp
         lambda **kwargs: FakeAsyncClient(responses, **kwargs),
     )
 
-    provider = HostStatusProvider(timeout_seconds=10, report_timezone="America/Sao_Paulo")
+    provider = HostStatusProvider(
+        timeout_seconds=10,
+        report_timezone="America/Sao_Paulo",
+        site_targets=TEST_SITE_TARGETS,
+    )
     snapshot = await provider.fetch_snapshot(
         locaweb_components_url=locaweb_components_url,
         locaweb_incidents_url=locaweb_incidents_url,
@@ -377,17 +383,7 @@ async def test_hostinger_http_error_is_handled(monkeypatch) -> None:
         "https://statuspage.hostinger.com/api/v2/summary.json": httpx.HTTPError(
             "http 403"
         ),
-        "https://private-site-01.example/": FakeResponse({}, status_code=200),
-        "https://private-site-02.example/": FakeResponse({}, status_code=200),
-        "https://private-site-03.example/": FakeResponse({}, status_code=200),
-        "https://private-site-04.example/": FakeResponse({}, status_code=200),
-        "https://private-site-05.example:4433/": FakeResponse({}, status_code=200),
-        "https://private-site-06.example/app/login": FakeResponse({}, status_code=200),
-        "https://private-site-07.example/app/login": FakeResponse({}, status_code=200),
-        "http://private-site-08.example:5001/": FakeResponse({}, status_code=200),
-        "http://private-site-09.example": FakeResponse({}, status_code=200),
-        "https://private-site-10.example/ui/": FakeResponse({}, status_code=200),
-        "https://private-site-11.example/signin?redirect=%252F": FakeResponse({}, status_code=200),
+        **_ok_site_responses(),
         "https://statusblog.locaweb.com.br/api/v2/components.json": FakeResponse({"components": []}),
         "https://statusblog.locaweb.com.br/api/v2/incidents.json": FakeResponse({"incidents": []}),
         "https://metastatus.com/data/orgs.json": FakeResponse([]),
@@ -402,7 +398,11 @@ async def test_hostinger_http_error_is_handled(monkeypatch) -> None:
         "src.automations_lib.providers.host_status_provider.httpx.AsyncClient",
         lambda **kwargs: FakeAsyncClient(responses, **kwargs),
     )
-    provider = HostStatusProvider(timeout_seconds=10, report_timezone="America/Sao_Paulo")
+    provider = HostStatusProvider(
+        timeout_seconds=10,
+        report_timezone="America/Sao_Paulo",
+        site_targets=TEST_SITE_TARGETS,
+    )
     snapshot = await provider.fetch_snapshot(
         locaweb_components_url="https://statusblog.locaweb.com.br/api/v2/components.json",
         locaweb_incidents_url="https://statusblog.locaweb.com.br/api/v2/incidents.json",
@@ -423,30 +423,27 @@ async def test_hostinger_http_error_is_handled(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_websites_rule_only_200_is_up(monkeypatch) -> None:
     responses = {
-        "https://private-site-01.example/": FakeResponse({}, status_code=200),
-        "https://private-site-02.example/": FakeResponse({}, status_code=301),
-        "https://private-site-03.example/": FakeResponse({}, status_code=502),
-        "https://private-site-04.example/": RuntimeError("timeout"),
-        "https://private-site-05.example:4433/": FakeResponse({}, status_code=200),
-        "https://private-site-06.example/app/login": FakeResponse({}, status_code=200),
-        "https://private-site-07.example/app/login": FakeResponse({}, status_code=200),
-        "http://private-site-08.example:5001/": FakeResponse({}, status_code=200),
-        "http://private-site-09.example": FakeResponse({}, status_code=200),
-        "https://private-site-10.example/ui/": FakeResponse({}, status_code=200),
-        "https://private-site-11.example/signin?redirect=%252F": FakeResponse({}, status_code=200),
+        **_ok_site_responses(),
+        "https://site02.test/": FakeResponse({}, status_code=301),
+        "https://site03.test/": FakeResponse({}, status_code=502),
+        "https://site04.test/": RuntimeError("timeout"),
     }
     monkeypatch.setattr(
         "src.automations_lib.providers.host_status_provider.httpx.AsyncClient",
         lambda **kwargs: FakeAsyncClient(responses, **kwargs),
     )
-    provider = HostStatusProvider(timeout_seconds=10, report_timezone="America/Sao_Paulo")
+    provider = HostStatusProvider(
+        timeout_seconds=10,
+        report_timezone="America/Sao_Paulo",
+        site_targets=TEST_SITE_TARGETS,
+    )
     report = await provider._fetch_websites()
 
-    mv = next(item for item in report.checks if item.label == "MV")
-    melior = next(item for item in report.checks if item.label == "Melior")
-    collis = next(item for item in report.checks if item.label == "Collis")
-    voip = next(item for item in report.checks if item.label == "VoipRogini")
-    assert mv.is_up is True
-    assert melior.is_up is False
-    assert collis.is_up is False
-    assert voip.is_up is False
+    site01 = next(item for item in report.checks if item.label == "Site 01")
+    site02 = next(item for item in report.checks if item.label == "Site 02")
+    site03 = next(item for item in report.checks if item.label == "Site 03")
+    site04 = next(item for item in report.checks if item.label == "Site 04")
+    assert site01.is_up is True
+    assert site02.is_up is False
+    assert site03.is_up is False
+    assert site04.is_up is False

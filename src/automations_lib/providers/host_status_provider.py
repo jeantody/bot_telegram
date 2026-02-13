@@ -170,23 +170,16 @@ class HostStatusProvider:
         "partial_outage": "Instavel",
         "major_outage": "Fora do ar",
     }
-    SITE_TARGETS = [
-        ("MV", "https://private-site-01.example/"),
-        ("Melior", "https://private-site-02.example/"),
-        ("Collis", "https://private-site-03.example/"),
-        ("VoipRogini", "https://private-site-04.example/"),
-        ("Voip Pet/Sind", "https://private-site-05.example:4433/"),
-        ("Chat Rogini", "https://private-site-06.example/app/login"),
-        ("Chat Accbook", "https://private-site-07.example/app/login"),
-        ("QPanel", "http://private-site-08.example:5001/"),
-        ("Resultado", "http://private-site-09.example"),
-        ("Echo", "https://private-site-10.example/ui/"),
-        ("Node accb", "https://private-site-11.example/signin?redirect=%252F"),
-    ]
 
-    def __init__(self, timeout_seconds: int, report_timezone: str) -> None:
+    def __init__(
+        self,
+        timeout_seconds: int,
+        report_timezone: str,
+        site_targets: tuple[tuple[str, str], ...] = (),
+    ) -> None:
         self._timeout_seconds = timeout_seconds
         self._report_tz = _resolve_timezone(report_timezone)
+        self._site_targets = tuple(site_targets)
 
     async def fetch_snapshot(
         self,
@@ -643,7 +636,7 @@ class HostStatusProvider:
             checks = await asyncio.gather(
                 *(
                     self._check_single_website(client=client, label=label, url=url)
-                    for label, url in self.SITE_TARGETS
+                    for label, url in self._site_targets
                 )
             )
         return WebsiteChecksReport(checks=checks)

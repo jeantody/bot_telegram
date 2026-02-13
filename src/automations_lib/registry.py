@@ -13,4 +13,3 @@ class AutomationRegistry:
     def get_by_trigger(self, trigger: str) -> list[Automation]:
         normalized = trigger.strip().lower()
         return [a for a in self._automations if a.trigger.strip().lower() == normalized]
-

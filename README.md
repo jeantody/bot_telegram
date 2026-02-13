@@ -41,6 +41,7 @@ Edite `.env`:
 - `UMBRELLA_SUMMARY_URL`, `UMBRELLA_INCIDENTS_URL`: endpoints da Cisco Umbrella
 - `HOSTINGER_SUMMARY_URL`, `HOSTINGER_COMPONENTS_URL`, `HOSTINGER_INCIDENTS_URL`, `HOSTINGER_STATUS_PAGE_URL`: endpoints da Hostinger
 - `HOST_REPORT_TIMEZONE`: timezone usada no filtro de incidentes do dia
+- `HOST_SITE_TARGETS_JSON`: lista JSON dos sites privados a monitorar, no formato `[["Nome","https://url"], ...]`
 
 ## Executar
 ```powershell

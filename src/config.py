@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import json
 import os
 
 from dotenv import load_dotenv
@@ -31,6 +32,7 @@ class Settings:
     hostinger_incidents_url: str
     hostinger_status_page_url: str
     host_report_timezone: str
+    host_site_targets: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
 
 def _read_int(name: str, default: int) -> int:
@@ -43,6 +45,42 @@ def _read_optional_int(name: str) -> int | None:
     if not raw:
         return None
     return int(raw)
+
+
+def _read_site_targets(name: str) -> tuple[tuple[str, str], ...]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return ()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid {name}: expected JSON list with [label, url] pairs."
+        ) from exc
+    if not isinstance(payload, list):
+        raise ValueError(f"Invalid {name}: expected a JSON list.")
+
+    normalized: list[tuple[str, str]] = []
+    for item in payload:
+        if isinstance(item, list) and len(item) == 2:
+            label_raw, url_raw = item
+        elif isinstance(item, dict):
+            label_raw = item.get("label")
+            url_raw = item.get("url")
+        else:
+            raise ValueError(
+                f"Invalid {name}: each item must be [label, url] or "
+                '{"label":"...","url":"..."}'
+            )
+
+        label = str(label_raw or "").strip()
+        url = str(url_raw or "").strip()
+        if not label or not url:
+            raise ValueError(
+                f"Invalid {name}: label and url are required for every item."
+            )
+        normalized.append((label, url))
+    return tuple(normalized)
 
 
 def load_settings() -> Settings:
@@ -125,4 +163,5 @@ def load_settings() -> Settings:
             "HOST_REPORT_TIMEZONE",
             "America/Sao_Paulo",
         ).strip(),
+        host_site_targets=_read_site_targets("HOST_SITE_TARGETS_JSON"),
     )

@@ -112,6 +112,10 @@ def build_context() -> AutomationContext:
 async def test_status_host_formats_consolidated_report() -> None:
     maintenance_start = datetime(2026, 2, 13, 4, 0, tzinfo=timezone.utc)
     maintenance_end = datetime(2026, 2, 13, 5, 0, tzinfo=timezone.utc)
+    code_maintenance_start = datetime(2026, 2, 13, 6, 0, tzinfo=timezone.utc)
+    code_maintenance_end = datetime(2026, 2, 13, 8, 0, tzinfo=timezone.utc)
+    code_maintenance_start_2 = datetime(2026, 2, 13, 16, 0, tzinfo=timezone.utc)
+    code_maintenance_end_2 = datetime(2026, 2, 13, 18, 0, tzinfo=timezone.utc)
     short_incident = HostIncident(
         source_id="1",
         title="Falha no acesso",
@@ -199,6 +203,16 @@ async def test_status_host_formats_consolidated_report() -> None:
                             scheduled_for=maintenance_start,
                             scheduled_until=maintenance_end,
                         ),
+                        HostMaintenance(
+                            name="Server US-1818 maintenance",
+                            scheduled_for=code_maintenance_start,
+                            scheduled_until=code_maintenance_end,
+                        ),
+                        HostMaintenance(
+                            name="Server SG-600 maintenance",
+                            scheduled_for=code_maintenance_start_2,
+                            scheduled_until=code_maintenance_end_2,
+                        ),
                     ],
                     error=None,
                 ),
@@ -206,14 +220,14 @@ async def test_status_host_formats_consolidated_report() -> None:
                     checks=[
                         WebsiteCheckResult(
                             label="MV",
-                            url="https://private-site-01.example/",
+                            url="https://site01.test/",
                             is_up=True,
                             final_status_code=200,
                             error=None,
                         ),
                         WebsiteCheckResult(
                             label="Chat Accbook",
-                            url="https://private-site-07.example/app/login",
+                            url="https://site07.test/login",
                             is_up=False,
                             final_status_code=502,
                             error="HTTP 502",
@@ -232,7 +246,8 @@ async def test_status_host_formats_consolidated_report() -> None:
     assert "<b>Meta</b>" in result.message
     assert "<b>Hostinger</b>" in result.message
     assert "<b>Sites Monitorados</b>" in result.message
-    assert "<b>PT::Cisco Umbrella</b>" in result.message
+    assert "<b>Cisco Umbrella</b>" in result.message
+    assert "<b>PT::Cisco Umbrella</b>" not in result.message
     assert "WhatsApp Availability: 99.98%" in result.message
     assert "P90 1397 ms, P99 2891 ms (last 31 days)" in result.message
     assert "Meta Admin Center" not in result.message
@@ -244,11 +259,12 @@ async def test_status_host_formats_consolidated_report() -> None:
     assert "- Chat Accbook: DOWN" in result.message
     assert "HTTP 502" not in result.message
     assert "- VPS node: major_outage" in result.message
-    assert "<b>Manutencoes futuras</b>" in result.message
-    assert "Server maintenance | inicio:" in result.message
-    assert "- pve-node234" in result.message
-    assert "- pve-node241" in result.message
-    assert "Database migration window | inicio:" in result.message
+    assert "<b>Manutenções futuras</b>" in result.message
+    assert "Server maintenance | inicio: 13/02/2026 | fim: 13/02/2026" in result.message
+    assert "01:00 --- 02:00 | pve-node | (234) | (241)" in result.message
+    assert "03:00 --- 05:00 | US-1818" in result.message
+    assert "13:00 --- 15:00 | SG-600" in result.message
+    assert "01:00 --- 02:00 | Database migration window" in result.message
     assert result.message.rfind("Cisco") > result.message.rfind("Sites Monitorados")
 
 
@@ -289,7 +305,7 @@ async def test_status_host_hides_incident_sections_when_empty() -> None:
                     checks=[
                         WebsiteCheckResult(
                             label="MV",
-                            url="https://private-site-01.example/",
+                            url="https://site01.test/",
                             is_up=True,
                             final_status_code=200,
                             error=None,
@@ -367,7 +383,7 @@ async def test_status_host_cisco_translation_fallback_when_translator_fails() ->
                     checks=[
                         WebsiteCheckResult(
                             label="MV",
-                            url="https://private-site-01.example/",
+                            url="https://site01.test/",
                             is_up=True,
                             final_status_code=200,
                             error=None,
@@ -387,3 +403,77 @@ async def test_status_host_cisco_translation_fallback_when_translator_fails() ->
     assert "Resolvido" in result.message
     assert "Todos os arquivos de politica foram processados e a fila esta normal." in result.message
     assert "All policy files have now been processed" not in result.message
+
+
+@pytest.mark.asyncio
+async def test_status_host_cisco_shows_only_first_update_per_incident() -> None:
+    umbrella_incident = HostIncident(
+        source_id="umb-only-first",
+        title="[Umbrella/Secure Connect] Policy Enforcement service is delayed processing globally",
+        status="Resolved",
+        started_at=None,
+        updates=[
+            HostIncidentUpdate(
+                status="Resolved",
+                body="All policy files have now been processed and the queue is clear.",
+                display_at=None,
+            ),
+            HostIncidentUpdate(
+                status="Identified",
+                body="We are continuing to process the remaining policy updates.",
+                display_at=None,
+            ),
+        ],
+    )
+    automation = StatusHostAutomation(
+        FakeProvider(
+            snapshot=HostSnapshot(
+                locaweb=LocawebReport(
+                    component_statuses={"Hospedagem": "operational"},
+                    all_operational=True,
+                    incidents_today=[],
+                    error=None,
+                ),
+                meta=MetaReport(
+                    orgs=[],
+                    whatsapp_availability=None,
+                    whatsapp_latency_p90_ms=None,
+                    whatsapp_latency_p99_ms=None,
+                    incidents_today=[],
+                    error=None,
+                ),
+                umbrella=UmbrellaReport(
+                    component_statuses={"Umbrella Global": "major_outage"},
+                    component_statuses_human={"Umbrella Global": "Major Outage"},
+                    all_operational=False,
+                    incidents_active_or_today=[umbrella_incident],
+                    error=None,
+                ),
+                hostinger=HostingerReport(
+                    overall_ok=True,
+                    vps_components_non_operational={},
+                    incidents_active_recent=[],
+                    upcoming_maintenances=[],
+                    error=None,
+                ),
+                websites=WebsiteChecksReport(
+                    checks=[
+                        WebsiteCheckResult(
+                            label="MV",
+                            url="https://site01.test/",
+                            is_up=True,
+                            final_status_code=200,
+                            error=None,
+                        )
+                    ]
+                ),
+            )
+        ),
+        translator=FailingTranslator(),
+    )
+
+    result = await automation.run(build_context())
+
+    assert result.ok is True
+    assert "Resolvido |" in result.message
+    assert "Identificado |" not in result.message

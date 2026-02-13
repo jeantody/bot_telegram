@@ -35,6 +35,7 @@ def _resolve_timezone(timezone_name: str) -> timezone | ZoneInfo:
 class StatusHostAutomation:
     name = "status_host"
     trigger = "host"
+    _TRANSLATION_PROTECTED_TERMS = {"cisco umbrella"}
     _PT_FALLBACK_EXACT = {
         "resolved": "Resolvido",
         "identified": "Identificado",
@@ -131,10 +132,10 @@ class StatusHostAutomation:
         lines = ["<b>Host Monitoring</b>"]
         umbrella_section = await self._format_umbrella(snapshot.umbrella, tzinfo)
         sections = [
+            self._format_websites(snapshot.websites),
             self._format_locaweb(snapshot.locaweb, tzinfo),
             self._format_meta(snapshot.meta, tzinfo),
             self._format_hostinger(snapshot.hostinger, tzinfo),
-            self._format_websites(snapshot.websites),
             umbrella_section,
         ]
         for section in sections:
@@ -199,7 +200,7 @@ class StatusHostAutomation:
             )
         )
         if report.upcoming_maintenances:
-            lines.append("<b>Manutencoes futuras</b>")
+            lines.append("<b>Manutenções futuras</b>")
             lines.extend(
                 self._format_hostinger_maintenances(
                     report.upcoming_maintenances,
@@ -234,8 +235,8 @@ class StatusHostAutomation:
                 continue
             problem_org_lines.append(self._format_meta_org(org))
 
+        lines.append("Saude: ALERTA" if problem_org_lines else "Saude: OK")
         if problem_org_lines:
-            lines.append("Saude: ALERTA")
             lines.extend(problem_org_lines)
 
         if report.whatsapp_availability is None:
@@ -268,8 +269,10 @@ class StatusHostAutomation:
     ) -> list[str]:
         if report.error:
             title = await self._translate_text("Cisco Umbrella", critical=True)
+            health = await self._translate_text("Saude: indisponivel", critical=True)
             return [
                 f"<b>{html.escape(title)}</b>",
+                html.escape(health),
                 html.escape(
                     await self._translate_text(
                         f"Falha ao consultar fonte: {report.error}",
@@ -278,28 +281,23 @@ class StatusHostAutomation:
                 ),
             ]
 
-        lines: list[str] = []
+        has_alert = (not report.all_operational) or bool(report.incidents_active_or_today)
+        if not has_alert:
+            return []
+
+        title = await self._translate_text("Cisco Umbrella", critical=True)
+        health = await self._translate_text("Saude: ALERTA", critical=True)
+        lines: list[str] = [f"<b>{html.escape(title)}</b>", html.escape(health)]
         for component, human in report.component_statuses_human.items():
             raw = report.component_statuses.get(component, "unknown")
             if raw.lower() == "operational" and human.lower() == "normal":
                 continue
-            if not lines:
-                title = await self._translate_text("Cisco Umbrella", critical=True)
-                lines.append(f"<b>{html.escape(title)}</b>")
-                lines.append(
-                    html.escape(
-                        await self._translate_text("Saude: ALERTA", critical=True)
-                    )
-                )
             safe_component = html.escape(
                 await self._translate_text(component, critical=True)
             )
             safe_human = html.escape(await self._translate_text(human, critical=True))
             safe_raw = html.escape(await self._translate_text(raw, critical=True))
             lines.append(f"- {safe_component}: {safe_human} ({safe_raw})")
-        if report.incidents_active_or_today and not lines:
-            title = await self._translate_text("Cisco Umbrella", critical=True)
-            lines.append(f"<b>{html.escape(title)}</b>")
         lines.extend(
             await self._format_incidents_translated(
                 await self._translate_text("Incidentes ativos/hoje", critical=True),
@@ -316,51 +314,129 @@ class StatusHostAutomation:
         maintenances: list[HostMaintenance],
         tzinfo: timezone | ZoneInfo,
     ) -> list[str]:
-        grouped_pve: dict[tuple[str, str, str], set[str]] = {}
-        other_lines: list[str] = []
+        grouped_pve: dict[tuple[datetime | None, datetime | None], set[str]] = {}
+        grouped_server_codes: dict[tuple[datetime | None, datetime | None], set[str]] = {}
+        compact_rows: list[tuple[datetime | None, datetime | None, str]] = []
         for maintenance in maintenances:
-            node = self._extract_pve_node_token(maintenance.name)
-            scheduled_for = self._format_datetime(maintenance.scheduled_for, tzinfo)
-            scheduled_until = self._format_datetime(maintenance.scheduled_until, tzinfo)
-            if node:
-                base_name = self._normalize_maintenance_base_name(maintenance.name)
-                key = (base_name, scheduled_for, scheduled_until)
-                grouped_pve.setdefault(key, set()).add(node)
+            local_start = self._to_local_datetime(maintenance.scheduled_for, tzinfo)
+            local_end = self._to_local_datetime(maintenance.scheduled_until, tzinfo)
+            key = (local_start, local_end)
+            node_number = self._extract_pve_node_number(maintenance.name)
+            if node_number:
+                grouped_pve.setdefault(key, set()).add(node_number)
                 continue
-            short_name = self._normalize_maintenance_base_name(maintenance.name)
-            other_lines.append(
-                f"- {html.escape(short_name)} | inicio: {html.escape(scheduled_for)} | "
-                f"fim: {html.escape(scheduled_until)}"
+            server_code = self._extract_server_code(maintenance.name)
+            if server_code and self._is_server_maintenance_name(maintenance.name):
+                grouped_server_codes.setdefault(key, set()).add(server_code)
+                continue
+            short_name = self._normalize_maintenance_compact_label(maintenance.name)
+            compact_rows.append((local_start, local_end, short_name))
+
+        for window, node_set in grouped_pve.items():
+            node_numbers = sorted(
+                node_set,
+                key=self._node_sort_key,
             )
+            if node_numbers:
+                formatted_nodes = " | ".join(
+                    f"({html.escape(number)})" for number in node_numbers
+                )
+                compact_rows.append((window[0], window[1], f"pve-node | {formatted_nodes}"))
+
+        for window, code_set in grouped_server_codes.items():
+            codes = sorted(
+                code_set,
+                key=self._server_code_sort_key,
+            )
+            compact_rows.append((window[0], window[1], " | ".join(codes)))
+
+        compact_rows.sort(
+            key=lambda item: (
+                item[0] or datetime.max.replace(tzinfo=timezone.utc),
+                item[1] or datetime.max.replace(tzinfo=timezone.utc),
+                item[2].lower(),
+            )
+        )
 
         lines: list[str] = []
-        for base_name, scheduled_for, scheduled_until in sorted(grouped_pve.keys()):
+        current_header: tuple[str, str] | None = None
+        for local_start, local_end, label in compact_rows:
+            start_date = self._format_date_only(local_start)
+            end_date = self._format_date_only(local_end)
+            header = (start_date, end_date)
+            if header != current_header:
+                lines.append(
+                    f"Server maintenance | inicio: {html.escape(start_date)} | "
+                    f"fim: {html.escape(end_date)}"
+                )
+                current_header = header
+            start_time = self._format_time_only(local_start)
+            end_time = self._format_time_only(local_end)
             lines.append(
-                f"{html.escape(base_name)} | inicio: {html.escape(scheduled_for)} | "
-                f"fim: {html.escape(scheduled_until)}"
+                f"{html.escape(start_time)} --- {html.escape(end_time)} | {html.escape(label)}"
             )
-            for node in sorted(grouped_pve[(base_name, scheduled_for, scheduled_until)]):
-                lines.append(f"- {html.escape(node)}")
-        lines.extend(other_lines)
         return lines
 
     @staticmethod
-    def _extract_pve_node_token(name: str) -> str | None:
+    def _extract_pve_node_number(name: str) -> str | None:
         match = re.search(r"\bpve-node-?(\d+)\b", name, flags=re.IGNORECASE)
         if not match:
             return None
-        return f"pve-node{match.group(1)}"
+        return match.group(1)
 
-    def _normalize_maintenance_base_name(self, name: str) -> str:
+    @staticmethod
+    def _node_sort_key(value: str) -> tuple[int, str]:
+        if value.isdigit():
+            return (0, f"{int(value):010d}")
+        return (1, value.lower())
+
+    @staticmethod
+    def _extract_server_code(name: str) -> str | None:
+        match = re.search(r"\b([a-z]{2,3}-\d{2,6})\b", name, flags=re.IGNORECASE)
+        if not match:
+            return None
+        return match.group(1).upper()
+
+    @staticmethod
+    def _server_code_sort_key(code: str) -> tuple[str, int]:
+        match = re.match(r"^([A-Z]{2,3})-(\d+)$", code)
+        if not match:
+            return (code, 0)
+        return (match.group(1), int(match.group(2)))
+
+    @staticmethod
+    def _is_server_maintenance_name(name: str) -> bool:
+        lowered = name.lower()
+        return "server" in lowered and "maintenance" in lowered
+
+    def _normalize_maintenance_compact_label(self, name: str) -> str:
         cleaned = re.sub(r"\bpve-node-?\d+\b", "", name, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bserver\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bmaintenance\b", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" -")
         if not cleaned:
-            return "Server maintenance"
-        compact = self._truncate_chars(cleaned, max_chars=70)
-        lowered = compact.lower()
-        if lowered.startswith("server") and lowered.endswith("maintenance"):
-            return "Server maintenance"
-        return compact
+            return "Maintenance"
+        return self._truncate_chars(cleaned, max_chars=70)
+
+    @staticmethod
+    def _to_local_datetime(
+        dt: datetime | None, tzinfo: timezone | ZoneInfo
+    ) -> datetime | None:
+        if dt is None:
+            return None
+        return dt.astimezone(tzinfo)
+
+    @staticmethod
+    def _format_date_only(dt: datetime | None) -> str:
+        if dt is None:
+            return "data indisponivel"
+        return dt.strftime("%d/%m/%Y")
+
+    @staticmethod
+    def _format_time_only(dt: datetime | None) -> str:
+        if dt is None:
+            return "horario indisponivel"
+        return dt.strftime("%H:%M")
 
     @staticmethod
     def _format_meta_org(org: MetaOrgReport) -> str:
@@ -469,7 +545,7 @@ class StatusHostAutomation:
             f"  {html.escape(status_label)}: {html.escape(status)}",
             f"  {html.escape(start_label)}: {html.escape(started)}",
         ]
-        for update in incident.updates:
+        for update in incident.updates[:1]:
             lines.extend(
                 await self._format_incident_update_translated(
                     update=update,
@@ -521,6 +597,8 @@ class StatusHostAutomation:
         normalized = text.strip()
         if not normalized:
             return text
+        if normalized.lower() in self._TRANSLATION_PROTECTED_TERMS:
+            return normalized
         cache_key = f"{int(critical)}:{normalized}"
         cached = self._translation_cache.get(cache_key)
         if cached is not None:

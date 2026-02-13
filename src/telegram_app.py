@@ -33,6 +33,7 @@ def build_application(settings: Settings) -> Application:
             HostStatusProvider(
                 timeout_seconds=settings.request_timeout_seconds,
                 report_timezone=settings.host_report_timezone,
+                site_targets=settings.host_site_targets,
             )
         )
     )
