@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import pytest
 
@@ -31,6 +32,12 @@ class FakeTranslator:
     def translate(self, text: str, dest: str = "pt") -> FakeTranslationResult:
         del dest
         return FakeTranslationResult(text=f"PT::{text}")
+
+
+class FailingTranslator:
+    def translate(self, text: str, dest: str = "pt"):
+        del text, dest
+        raise RuntimeError("translation down")
 
 
 @dataclass
@@ -103,6 +110,8 @@ def build_context() -> AutomationContext:
 
 @pytest.mark.asyncio
 async def test_status_host_formats_consolidated_report() -> None:
+    maintenance_start = datetime(2026, 2, 13, 4, 0, tzinfo=timezone.utc)
+    maintenance_end = datetime(2026, 2, 13, 5, 0, tzinfo=timezone.utc)
     short_incident = HostIncident(
         source_id="1",
         title="Falha no acesso",
@@ -176,10 +185,20 @@ async def test_status_host_formats_consolidated_report() -> None:
                     incidents_active_recent=[short_incident],
                     upcoming_maintenances=[
                         HostMaintenance(
-                            name="Window maintenance",
-                            scheduled_for=None,
-                            scheduled_until=None,
-                        )
+                            name="Server pve-node241 maintenance",
+                            scheduled_for=maintenance_start,
+                            scheduled_until=maintenance_end,
+                        ),
+                        HostMaintenance(
+                            name="Server pve-node234 maintenance",
+                            scheduled_for=maintenance_start,
+                            scheduled_until=maintenance_end,
+                        ),
+                        HostMaintenance(
+                            name="Database migration window",
+                            scheduled_for=maintenance_start,
+                            scheduled_until=maintenance_end,
+                        ),
                     ],
                     error=None,
                 ),
@@ -226,7 +245,10 @@ async def test_status_host_formats_consolidated_report() -> None:
     assert "HTTP 502" not in result.message
     assert "- VPS node: major_outage" in result.message
     assert "<b>Manutencoes futuras</b>" in result.message
-    assert "Window maintenance" in result.message
+    assert "Server maintenance | inicio:" in result.message
+    assert "- pve-node234" in result.message
+    assert "- pve-node241" in result.message
+    assert "Database migration window | inicio:" in result.message
     assert result.message.rfind("Cisco") > result.message.rfind("Sites Monitorados")
 
 
@@ -289,3 +311,79 @@ async def test_status_host_hides_incident_sections_when_empty() -> None:
     assert "Sites OK: 1/1" in result.message
     assert "Incidentes de hoje" not in result.message
     assert "Incidentes ativos/hoje" not in result.message
+
+
+@pytest.mark.asyncio
+async def test_status_host_cisco_translation_fallback_when_translator_fails() -> None:
+    umbrella_incident = HostIncident(
+        source_id="umb-1",
+        title="[Umbrella/Secure Connect] Policy Enforcement service is delayed processing globally",
+        status="Resolved",
+        started_at=None,
+        updates=[
+            HostIncidentUpdate(
+                status="Resolved",
+                body=(
+                    "All policy files have now been processed and the queue is clear. "
+                    "Policy generation is functioning as expected, with new policies being "
+                    "applied promptly after configuration."
+                ),
+                display_at=None,
+            )
+        ],
+    )
+    automation = StatusHostAutomation(
+        FakeProvider(
+            snapshot=HostSnapshot(
+                locaweb=LocawebReport(
+                    component_statuses={"Hospedagem": "operational"},
+                    all_operational=True,
+                    incidents_today=[],
+                    error=None,
+                ),
+                meta=MetaReport(
+                    orgs=[],
+                    whatsapp_availability=None,
+                    whatsapp_latency_p90_ms=None,
+                    whatsapp_latency_p99_ms=None,
+                    incidents_today=[],
+                    error=None,
+                ),
+                umbrella=UmbrellaReport(
+                    component_statuses={"Umbrella Global": "major_outage"},
+                    component_statuses_human={"Umbrella Global": "Major Outage"},
+                    all_operational=False,
+                    incidents_active_or_today=[umbrella_incident],
+                    error=None,
+                ),
+                hostinger=HostingerReport(
+                    overall_ok=True,
+                    vps_components_non_operational={},
+                    incidents_active_recent=[],
+                    upcoming_maintenances=[],
+                    error=None,
+                ),
+                websites=WebsiteChecksReport(
+                    checks=[
+                        WebsiteCheckResult(
+                            label="MV",
+                            url="https://private-site-01.example/",
+                            is_up=True,
+                            final_status_code=200,
+                            error=None,
+                        )
+                    ]
+                ),
+            )
+        ),
+        translator=FailingTranslator(),
+    )
+
+    result = await automation.run(build_context())
+
+    assert result.ok is True
+    assert "<b>Cisco Umbrella</b>" in result.message
+    assert "<b>Incidentes ativos/hoje</b>" in result.message
+    assert "Resolvido" in result.message
+    assert "Todos os arquivos de politica foram processados e a fila esta normal." in result.message
+    assert "All policy files have now been processed" not in result.message

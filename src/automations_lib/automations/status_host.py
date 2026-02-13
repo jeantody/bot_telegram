@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 import html
+import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import httpx
 
 from src.automations_lib.models import AutomationContext, AutomationResult
 from src.automations_lib.providers.host_status_provider import (
@@ -32,6 +35,76 @@ def _resolve_timezone(timezone_name: str) -> timezone | ZoneInfo:
 class StatusHostAutomation:
     name = "status_host"
     trigger = "host"
+    _PT_FALLBACK_EXACT = {
+        "resolved": "Resolvido",
+        "identified": "Identificado",
+        "investigating": "Investigando",
+        "monitoring": "Monitorando",
+        "status": "Status",
+        "inicio": "Inicio",
+        "incidentes ativos/hoje": "Incidentes ativos/hoje",
+        "cisco umbrella": "Cisco Umbrella",
+        "degraded performance": "Desempenho degradado",
+        "degraded_performance": "Desempenho degradado",
+        "partial outage": "Indisponibilidade parcial",
+        "partial_outage": "Indisponibilidade parcial",
+        "major outage": "Indisponibilidade critica",
+        "major_outage": "Indisponibilidade critica",
+    }
+    _PT_FALLBACK_REPLACEMENTS = (
+        (
+            "All policy files have now been processed and the queue is clear.",
+            "Todos os arquivos de politica foram processados e a fila esta normal.",
+        ),
+        (
+            "Policy generation is functioning as expected",
+            "A geracao de politicas esta funcionando como esperado",
+        ),
+        (
+            "with new policies being applied promptly after configuration",
+            "com novas politicas aplicadas rapidamente apos a configuracao",
+        ),
+        (
+            "Policy generation is functioning as expected, with new policies being applied promptly after configuration.",
+            "A geracao de politicas esta funcionando como esperado, com novas politicas aplicadas rapidamente apos a configuracao.",
+        ),
+        (
+            "Verification confirms that policies are being delivered efficiently, and all policy translation tests are passing.",
+            "A verificacao confirma que as politicas estao sendo entregues com eficiencia e todos os testes de traducao de politicas estao passando.",
+        ),
+        (
+            "We are continuing to process the remaining policy updates",
+            "Seguimos processando as atualizacoes de politica restantes",
+        ),
+        (
+            "and are making steady progress toward full resolution",
+            "e avancando de forma consistente para a resolucao completa",
+        ),
+        (
+            "We are continuing to process the remaining policy updates and are making steady progress toward full resolution.",
+            "Seguimos processando as atualizacoes de politica restantes e avancando de forma consistente para a resolucao completa.",
+        ),
+        (
+            "We are very close to moving into a monitoring state",
+            "Estamos muito perto de entrar em monitoramento",
+        ),
+        (
+            "expect normal policy update functionality to be restored soon",
+            "e esperamos restaurar em breve o funcionamento normal das atualizacoes de politica",
+        ),
+        (
+            "We are very close to moving into a monitoring state and expect normal policy update functionality to be restored soon.",
+            "Estamos muito perto de entrar em monitoramento e esperamos restaurar em breve o funcionamento normal das atualizacoes de politica.",
+        ),
+        (
+            "Further updates will be provided as we confirm resolution.",
+            "Novas atualizacoes serao publicadas conforme confirmarmos a resolucao.",
+        ),
+        (
+            "We appreciate your patience and understanding as we work to restore optimal service.",
+            "Agradecemos a paciencia e a compreensao enquanto trabalhamos para restaurar o servico ideal.",
+        ),
+    )
 
     def __init__(self, provider: HostStatusProvider, translator=None) -> None:
         self._provider = provider
@@ -127,8 +200,12 @@ class StatusHostAutomation:
         )
         if report.upcoming_maintenances:
             lines.append("<b>Manutencoes futuras</b>")
-            for item in report.upcoming_maintenances:
-                lines.append(self._format_maintenance(item, tzinfo))
+            lines.extend(
+                self._format_hostinger_maintenances(
+                    report.upcoming_maintenances,
+                    tzinfo,
+                )
+            )
         return lines
 
     def _format_websites(self, report: WebsiteChecksReport) -> list[str]:
@@ -190,12 +267,13 @@ class StatusHostAutomation:
         self, report: UmbrellaReport, tzinfo: timezone | ZoneInfo
     ) -> list[str]:
         if report.error:
-            title = await self._translate_text("Cisco Umbrella")
+            title = await self._translate_text("Cisco Umbrella", critical=True)
             return [
                 f"<b>{html.escape(title)}</b>",
                 html.escape(
                     await self._translate_text(
-                        f"Falha ao consultar fonte: {report.error}"
+                        f"Falha ao consultar fonte: {report.error}",
+                        critical=True,
                     )
                 ),
             ]
@@ -206,19 +284,25 @@ class StatusHostAutomation:
             if raw.lower() == "operational" and human.lower() == "normal":
                 continue
             if not lines:
-                title = await self._translate_text("Cisco Umbrella")
+                title = await self._translate_text("Cisco Umbrella", critical=True)
                 lines.append(f"<b>{html.escape(title)}</b>")
-                lines.append(html.escape(await self._translate_text("Saude: ALERTA")))
-            safe_component = html.escape(await self._translate_text(component))
-            safe_human = html.escape(await self._translate_text(human))
-            safe_raw = html.escape(await self._translate_text(raw))
+                lines.append(
+                    html.escape(
+                        await self._translate_text("Saude: ALERTA", critical=True)
+                    )
+                )
+            safe_component = html.escape(
+                await self._translate_text(component, critical=True)
+            )
+            safe_human = html.escape(await self._translate_text(human, critical=True))
+            safe_raw = html.escape(await self._translate_text(raw, critical=True))
             lines.append(f"- {safe_component}: {safe_human} ({safe_raw})")
         if report.incidents_active_or_today and not lines:
-            title = await self._translate_text("Cisco Umbrella")
+            title = await self._translate_text("Cisco Umbrella", critical=True)
             lines.append(f"<b>{html.escape(title)}</b>")
         lines.extend(
             await self._format_incidents_translated(
-                await self._translate_text("Incidentes ativos/hoje"),
+                await self._translate_text("Incidentes ativos/hoje", critical=True),
                 report.incidents_active_or_today,
                 tzinfo,
                 title_bold=True,
@@ -227,16 +311,56 @@ class StatusHostAutomation:
         )
         return lines
 
-    def _format_maintenance(
-        self, maintenance: HostMaintenance, tzinfo: timezone | ZoneInfo
-    ) -> str:
-        name = html.escape(maintenance.name)
-        scheduled_for = self._format_datetime(maintenance.scheduled_for, tzinfo)
-        scheduled_until = self._format_datetime(maintenance.scheduled_until, tzinfo)
-        return (
-            f"- {name} | inicio: {html.escape(scheduled_for)} | "
-            f"fim: {html.escape(scheduled_until)}"
-        )
+    def _format_hostinger_maintenances(
+        self,
+        maintenances: list[HostMaintenance],
+        tzinfo: timezone | ZoneInfo,
+    ) -> list[str]:
+        grouped_pve: dict[tuple[str, str, str], set[str]] = {}
+        other_lines: list[str] = []
+        for maintenance in maintenances:
+            node = self._extract_pve_node_token(maintenance.name)
+            scheduled_for = self._format_datetime(maintenance.scheduled_for, tzinfo)
+            scheduled_until = self._format_datetime(maintenance.scheduled_until, tzinfo)
+            if node:
+                base_name = self._normalize_maintenance_base_name(maintenance.name)
+                key = (base_name, scheduled_for, scheduled_until)
+                grouped_pve.setdefault(key, set()).add(node)
+                continue
+            short_name = self._normalize_maintenance_base_name(maintenance.name)
+            other_lines.append(
+                f"- {html.escape(short_name)} | inicio: {html.escape(scheduled_for)} | "
+                f"fim: {html.escape(scheduled_until)}"
+            )
+
+        lines: list[str] = []
+        for base_name, scheduled_for, scheduled_until in sorted(grouped_pve.keys()):
+            lines.append(
+                f"{html.escape(base_name)} | inicio: {html.escape(scheduled_for)} | "
+                f"fim: {html.escape(scheduled_until)}"
+            )
+            for node in sorted(grouped_pve[(base_name, scheduled_for, scheduled_until)]):
+                lines.append(f"- {html.escape(node)}")
+        lines.extend(other_lines)
+        return lines
+
+    @staticmethod
+    def _extract_pve_node_token(name: str) -> str | None:
+        match = re.search(r"\bpve-node-?(\d+)\b", name, flags=re.IGNORECASE)
+        if not match:
+            return None
+        return f"pve-node{match.group(1)}"
+
+    def _normalize_maintenance_base_name(self, name: str) -> str:
+        cleaned = re.sub(r"\bpve-node-?\d+\b", "", name, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -")
+        if not cleaned:
+            return "Server maintenance"
+        compact = self._truncate_chars(cleaned, max_chars=70)
+        lowered = compact.lower()
+        if lowered.startswith("server") and lowered.endswith("maintenance"):
+            return "Server maintenance"
+        return compact
 
     @staticmethod
     def _format_meta_org(org: MetaOrgReport) -> str:
@@ -336,10 +460,10 @@ class StatusHostAutomation:
         max_body_chars: int | None = None,
     ) -> list[str]:
         started = self._format_datetime(incident.started_at, tzinfo)
-        title = await self._translate_text(incident.title)
-        status = await self._translate_text(incident.status)
-        status_label = await self._translate_text("Status")
-        start_label = await self._translate_text("Inicio")
+        title = await self._translate_text(incident.title, critical=True)
+        status = await self._translate_text(incident.status, critical=True)
+        status_label = await self._translate_text("Status", critical=True)
+        start_label = await self._translate_text("Inicio", critical=True)
         lines = [
             f"- {html.escape(title)}",
             f"  {html.escape(status_label)}: {html.escape(status)}",
@@ -362,13 +486,13 @@ class StatusHostAutomation:
         max_body_chars: int | None = None,
     ) -> list[str]:
         raw_status = update.status if update.status else "Unknown"
-        raw_status = await self._translate_text(raw_status)
+        raw_status = await self._translate_text(raw_status, critical=True)
         status = html.escape(raw_status) or "Unknown"
         display_at = self._format_datetime(update.display_at, tzinfo)
         raw_body = update.body if update.body else "Sem detalhes."
+        raw_body = await self._translate_text(raw_body, critical=True)
         if max_body_chars is not None:
             raw_body = self._truncate_chars(raw_body, max_body_chars)
-        raw_body = await self._translate_text(raw_body)
         body_lines = self._truncate_lines(raw_body, max_lines=3)
         body_lines = [f"    {html.escape(line)}" for line in body_lines]
         return [f"  - {status} | {display_at}", *body_lines]
@@ -393,25 +517,41 @@ class StatusHostAutomation:
     def _is_no_known_issue(status: str) -> bool:
         return status.strip().lower() == "no known issues"
 
-    async def _translate_text(self, text: str) -> str:
+    async def _translate_text(self, text: str, critical: bool = False) -> str:
         normalized = text.strip()
         if not normalized:
             return text
-        cached = self._translation_cache.get(normalized)
+        cache_key = f"{int(critical)}:{normalized}"
+        cached = self._translation_cache.get(cache_key)
         if cached is not None:
             return cached
+
+        fallback_text = self._apply_pt_fallback(normalized)
         translator = self._get_translator()
         if translator is None:
-            self._translation_cache[normalized] = text
-            return text
+            resolved = text
+            if critical:
+                resolved = await self._translate_text_via_google_http(normalized)
+                if self._looks_untranslated(normalized, resolved):
+                    resolved = fallback_text
+            self._translation_cache[cache_key] = resolved
+            return resolved
+
         try:
             translated = translator.translate(normalized, dest="pt")
             if asyncio.iscoroutine(translated):
                 translated = await translated
-            translated_text = getattr(translated, "text", "") or text
+            translated_text = (getattr(translated, "text", "") or "").strip() or text
         except Exception:
             translated_text = text
-        self._translation_cache[normalized] = translated_text
+
+        if critical and self._looks_untranslated(normalized, translated_text):
+            if self._can_use_http_translation(translator):
+                translated_text = await self._translate_text_via_google_http(normalized)
+        if critical and self._looks_untranslated(normalized, translated_text):
+            translated_text = fallback_text
+
+        self._translation_cache[cache_key] = translated_text
         return translated_text
 
     def _get_translator(self):
@@ -423,6 +563,61 @@ class StatusHostAutomation:
             return None
         self._translator = Translator()
         return self._translator
+
+    @classmethod
+    def _apply_pt_fallback(cls, text: str) -> str:
+        normalized = text.strip()
+        if not normalized:
+            return text
+        exact = cls._PT_FALLBACK_EXACT.get(normalized.lower())
+        if exact is not None:
+            return exact
+
+        translated = normalized
+        for source, target in cls._PT_FALLBACK_REPLACEMENTS:
+            translated = re.sub(
+                re.escape(source),
+                target,
+                translated,
+                flags=re.IGNORECASE,
+            )
+
+        return translated
+
+    @staticmethod
+    def _looks_untranslated(original: str, translated: str) -> bool:
+        def normalize(value: str) -> str:
+            return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+        return normalize(original) == normalize(translated)
+
+    @staticmethod
+    def _can_use_http_translation(translator) -> bool:
+        module_name = getattr(translator.__class__, "__module__", "")
+        return module_name.startswith("googletrans")
+
+    async def _translate_text_via_google_http(self, text: str) -> str:
+        try:
+            async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+                response = await client.get(
+                    "https://translate.googleapis.com/translate_a/single",
+                    params={
+                        "client": "gtx",
+                        "sl": "auto",
+                        "tl": "pt",
+                        "dt": "t",
+                        "q": text,
+                    },
+                )
+            response.raise_for_status()
+            payload = response.json()
+            segments = payload[0] if isinstance(payload, list) and payload else []
+            translated = "".join(
+                str(item[0]) for item in segments if isinstance(item, list) and item
+            ).strip()
+            return translated or text
+        except Exception:
+            return text
 
     @staticmethod
     def _format_datetime(

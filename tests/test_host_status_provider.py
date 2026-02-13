@@ -50,6 +50,12 @@ def _build_day_offset_iso(day_offset: int, hour: int, minute: int) -> str:
     return target.replace(hour=hour, minute=minute, second=0, microsecond=0).isoformat()
 
 
+def _build_hours_offset_iso(hours: int) -> str:
+    sao_paulo = timezone(timedelta(hours=-3))
+    target = datetime.now(sao_paulo) + timedelta(hours=hours)
+    return target.replace(second=0, microsecond=0).isoformat()
+
+
 @pytest.mark.asyncio
 async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> None:
     locaweb_components_url = "https://statusblog.locaweb.com.br/api/v2/components.json"
@@ -67,8 +73,12 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
     now_iso = _build_day_offset_iso(0, 10, 15)
     yesterday_iso = _build_day_offset_iso(-1, 9, 10)
     two_days_ago_iso = _build_day_offset_iso(-2, 8, 0)
-    tomorrow_iso = _build_day_offset_iso(1, 22, 0)
-    tomorrow_end_iso = _build_day_offset_iso(2, 2, 0)
+    today_future_iso = _build_hours_offset_iso(2)
+    today_future_end_iso = _build_hours_offset_iso(3)
+    tomorrow_iso = _build_hours_offset_iso(26)
+    tomorrow_end_iso = _build_hours_offset_iso(27)
+    after_tomorrow_iso = _build_hours_offset_iso(50)
+    after_tomorrow_end_iso = _build_hours_offset_iso(51)
     responses = {
         locaweb_components_url: FakeResponse(
             {
@@ -201,6 +211,12 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
                 ],
                 "scheduled_maintenances": [
                     {
+                        "id": "m0",
+                        "name": "Maintenance today",
+                        "scheduled_for": today_future_iso,
+                        "scheduled_until": today_future_end_iso,
+                    },
+                    {
                         "id": "m1",
                         "name": "Maintenance future",
                         "scheduled_for": tomorrow_iso,
@@ -208,6 +224,12 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
                     },
                     {
                         "id": "m2",
+                        "name": "Maintenance after tomorrow",
+                        "scheduled_for": after_tomorrow_iso,
+                        "scheduled_until": after_tomorrow_end_iso,
+                    },
+                    {
+                        "id": "m3",
                         "name": "Maintenance past",
                         "scheduled_for": two_days_ago_iso,
                         "scheduled_until": yesterday_iso,
@@ -263,7 +285,11 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
     assert "pve-node-22" in snapshot.hostinger.vps_components_non_operational
     assert "VPS BR-01" not in snapshot.hostinger.vps_components_non_operational
     assert len(snapshot.hostinger.incidents_active_recent) == 2
-    assert len(snapshot.hostinger.upcoming_maintenances) == 1
+    assert len(snapshot.hostinger.upcoming_maintenances) == 2
+    names = {item.name for item in snapshot.hostinger.upcoming_maintenances}
+    assert "Maintenance today" in names
+    assert "Maintenance future" in names
+    assert "Maintenance after tomorrow" not in names
     assert len(snapshot.websites.checks) == 11
     chat_accbook = next(
         item for item in snapshot.websites.checks if item.label == "Chat Accbook"
