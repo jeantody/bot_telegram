@@ -315,12 +315,12 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
     assert "pve-node-22" in snapshot.hostinger.vps_components_non_operational
     assert "VPS BR-01" not in snapshot.hostinger.vps_components_non_operational
     assert len(snapshot.hostinger.incidents_active_recent) == 2
-    assert len(snapshot.hostinger.upcoming_maintenances) == 4
+    assert len(snapshot.hostinger.upcoming_maintenances) == 2
     names = {item.name for item in snapshot.hostinger.upcoming_maintenances}
-    assert "Maintenance yesterday crossing midnight" in names
     assert "Maintenance today past hour" in names
     assert "Maintenance today" in names
-    assert "Maintenance future" in names
+    assert "Maintenance yesterday crossing midnight" not in names
+    assert "Maintenance future" not in names
     assert "Maintenance after tomorrow" not in names
     assert len(snapshot.websites.checks) == 11
     site07 = next(item for item in snapshot.websites.checks if item.label == "Site 07")
@@ -465,3 +465,93 @@ async def test_websites_rule_only_200_is_up(monkeypatch) -> None:
     assert site02.is_up is False
     assert site03.is_up is False
     assert site04.is_up is False
+
+
+@pytest.mark.asyncio
+async def test_hostinger_maintenance_filters_by_scheduled_for_today_only(monkeypatch) -> None:
+    hostinger_summary_url = "https://statuspage.hostinger.com/api/v2/summary.json"
+    now_iso = _build_day_offset_iso(0, 10, 15)
+    yesterday_cross_start_iso = _build_day_offset_iso(-1, 23, 0)
+    yesterday_cross_end_iso = _build_day_offset_iso(0, 0, 0)
+    today_cross_start_iso = _build_day_offset_iso(0, 23, 0)
+    today_cross_end_iso = _build_day_offset_iso(1, 1, 0)
+    tomorrow_iso = _build_day_offset_iso(1, 9, 0)
+    tomorrow_end_iso = _build_day_offset_iso(1, 10, 0)
+
+    responses = {
+        "https://statusblog.locaweb.com.br/api/v2/components.json": FakeResponse({"components": []}),
+        "https://statusblog.locaweb.com.br/api/v2/incidents.json": FakeResponse({"incidents": []}),
+        "https://metastatus.com/data/orgs.json": FakeResponse([]),
+        "https://metastatus.com/data/outages/whatsapp-business-api.history.json": FakeResponse([]),
+        "https://metastatus.com/metrics/whatsapp-business-api/cloudapi_uptime_daily.json": FakeResponse({"values": []}),
+        "https://metastatus.com/metrics/whatsapp-business-api/event_tagging_latency_last_31_days_p90_s3.json": FakeResponse({"values": []}),
+        "https://metastatus.com/metrics/whatsapp-business-api/event_tagging_latency_last_31_days_p99_s3.json": FakeResponse({"values": []}),
+        "https://status.umbrella.com/api/v2/summary.json": FakeResponse({"components": []}),
+        "https://status.umbrella.com/api/v2/incidents.json": FakeResponse({"incidents": []}),
+        hostinger_summary_url: FakeResponse(
+            {
+                "components": [],
+                "incidents": [
+                    {
+                        "id": "h1",
+                        "name": "Hostinger incident major",
+                        "status": "investigating",
+                        "impact": "major",
+                        "created_at": now_iso,
+                        "started_at": now_iso,
+                        "incident_updates": [],
+                    }
+                ],
+                "scheduled_maintenances": [
+                    {
+                        "id": "yesterday_to_today",
+                        "name": "Started yesterday, ends today",
+                        "scheduled_for": yesterday_cross_start_iso,
+                        "scheduled_until": yesterday_cross_end_iso,
+                    },
+                    {
+                        "id": "today_to_tomorrow",
+                        "name": "Starts today, ends tomorrow",
+                        "scheduled_for": today_cross_start_iso,
+                        "scheduled_until": today_cross_end_iso,
+                    },
+                    {
+                        "id": "tomorrow_only",
+                        "name": "Starts tomorrow",
+                        "scheduled_for": tomorrow_iso,
+                        "scheduled_until": tomorrow_end_iso,
+                    },
+                ],
+            }
+        ),
+        **_ok_site_responses(),
+    }
+
+    monkeypatch.setattr(
+        "src.automations_lib.providers.host_status_provider.httpx.AsyncClient",
+        lambda **kwargs: FakeAsyncClient(responses, **kwargs),
+    )
+
+    provider = HostStatusProvider(
+        timeout_seconds=10,
+        report_timezone="America/Sao_Paulo",
+        site_targets=TEST_SITE_TARGETS,
+    )
+    snapshot = await provider.fetch_snapshot(
+        locaweb_components_url="https://statusblog.locaweb.com.br/api/v2/components.json",
+        locaweb_incidents_url="https://statusblog.locaweb.com.br/api/v2/incidents.json",
+        meta_orgs_url="https://metastatus.com/data/orgs.json",
+        meta_outages_url_template="https://metastatus.com/data/outages/{org}.history.json",
+        meta_metrics_url_template="https://metastatus.com/metrics/{org}/{metric}.json",
+        umbrella_summary_url="https://status.umbrella.com/api/v2/summary.json",
+        umbrella_incidents_url="https://status.umbrella.com/api/v2/incidents.json",
+        hostinger_summary_url=hostinger_summary_url,
+        hostinger_components_url="https://statuspage.hostinger.com/api/v2/components.json",
+        hostinger_incidents_url="https://statuspage.hostinger.com/api/v2/incidents.json",
+        hostinger_status_page_url="https://statuspage.hostinger.com/",
+    )
+
+    names = {item.name for item in snapshot.hostinger.upcoming_maintenances}
+    assert "Starts today, ends tomorrow" in names
+    assert "Started yesterday, ends today" not in names
+    assert "Starts tomorrow" not in names

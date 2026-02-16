@@ -50,16 +50,6 @@ def _is_today_or_yesterday_in_timezone(
     return candidate in {current_date, current_date - timedelta(days=1)}
 
 
-def _is_today_or_tomorrow_in_timezone(
-    dt: datetime | None, tzinfo: timezone | ZoneInfo
-) -> bool:
-    if dt is None:
-        return False
-    current_date = datetime.now(tzinfo).date()
-    candidate = dt.astimezone(tzinfo).date()
-    return candidate in {current_date, current_date + timedelta(days=1)}
-
-
 def _title_case_status(status: str) -> str:
     if not status:
         return "Unknown"
@@ -604,17 +594,13 @@ class HostStatusProvider:
         self, maintenances: list[dict]
     ) -> list[HostMaintenance]:
         result: list[HostMaintenance] = []
+        today_local = datetime.now(self._report_tz).date()
         for maintenance in maintenances:
             scheduled_for = _parse_dt(maintenance.get("scheduled_for"))
             scheduled_until = _parse_dt(maintenance.get("scheduled_until"))
             if scheduled_for is None:
                 continue
-            if not (
-                _is_today_or_tomorrow_in_timezone(scheduled_for, self._report_tz)
-                or _is_today_or_tomorrow_in_timezone(
-                    scheduled_until, self._report_tz
-                )
-            ):
+            if scheduled_for.astimezone(self._report_tz).date() != today_local:
                 continue
             result.append(
                 HostMaintenance(
