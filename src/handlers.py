@@ -535,7 +535,7 @@ class BotHandlers:
                     f"dest={html.escape(row.target_number or '-')}"
                 )
                 if row.error:
-                    line += f" | erro={html.escape(row.error[:80])}"
+                    line += f" | erro={html.escape(row.error[:220])}"
                 lines.append(line)
             await self._reply_chunks(message, "\n".join(lines))
             self._record_audit(

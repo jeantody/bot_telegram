@@ -86,6 +86,10 @@ def test_run_voip_probe_renders_auth_challenge_flow(tmp_path: Path, monkeypatch)
                 "Authorization: [authentication" not in first_invite
                 and "Authorization: [authentication" in second_invite
                 and xml.count("Authorization: [authentication") == 1
+                and "CSeq: 1 INVITE" in first_invite
+                and "CSeq: 2 INVITE" in second_invite
+                and "CSeq: 2 ACK" in xml
+                and "CSeq: 3 BYE" in xml
             )
         return subprocess.CompletedProcess(
             args=command,

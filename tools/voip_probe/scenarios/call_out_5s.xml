@@ -48,7 +48,7 @@ Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
 From: "{{CALLER_ID}}" <sip:{{CALLER_ID}}@{{SIP_DOMAIN}}>;tag=[call_number]
 To: <sip:{{TARGET_NUMBER}}@{{SIP_DOMAIN}}>
 Call-ID: [call_id]
-CSeq: 1 INVITE
+CSeq: 2 INVITE
 Contact: <sip:{{CALLER_ID}}@[local_ip]:[local_port]>
 Max-Forwards: 70
 Authorization: [authentication username="{{SIP_LOGIN}}" password="{{SIP_PASSWORD}}"]
@@ -83,7 +83,7 @@ Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
 From: "{{CALLER_ID}}" <sip:{{CALLER_ID}}@{{SIP_DOMAIN}}>;tag=[call_number]
 To: <sip:{{TARGET_NUMBER}}@{{SIP_DOMAIN}}>[peer_tag_param]
 Call-ID: [call_id]
-CSeq: 1 ACK
+CSeq: 2 ACK
 Contact: <sip:{{CALLER_ID}}@[local_ip]:[local_port]>
 Max-Forwards: 70
 Content-Length: 0
@@ -99,7 +99,7 @@ Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
 From: "{{CALLER_ID}}" <sip:{{CALLER_ID}}@{{SIP_DOMAIN}}>;tag=[call_number]
 To: <sip:{{TARGET_NUMBER}}@{{SIP_DOMAIN}}>[peer_tag_param]
 Call-ID: [call_id]
-CSeq: 2 BYE
+CSeq: 3 BYE
 Contact: <sip:{{CALLER_ID}}@[local_ip]:[local_port]>
 Max-Forwards: 70
 Content-Length: 0
