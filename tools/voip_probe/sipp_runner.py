@@ -132,7 +132,7 @@ def run_voip_probe(settings: VoipProbeSettings) -> VoipProbeRunResult:
             timed_out=timed_out,
         )
 
-    completed_call = return_code == 0 and (parsed.sip_final_code == 200 or parsed.sip_final_code is None)
+    completed_call = return_code == 0 and parsed.sip_final_code == 200
     no_issues = completed_call and parsed.error is None
     ok = no_issues
     return VoipProbeRunResult(

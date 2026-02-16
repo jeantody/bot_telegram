@@ -67,3 +67,34 @@ def test_run_voip_probe_binary_missing_sets_error(tmp_path: Path, monkeypatch) -
     result = run_voip_probe(settings)
     assert result.ok is False
     assert "sipp binary not found" in (result.error or "")
+
+
+def test_run_voip_probe_renders_auth_challenge_flow(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    captured = {"checked": False}
+
+    def fake_run(command, **kwargs):
+        sf_index = command.index("-sf")
+        scenario_path = Path(command[sf_index + 1])
+        xml = scenario_path.read_text(encoding="utf-8")
+        marker = f"INVITE sip:{settings.target_number}@{settings.sip_domain} SIP/2.0"
+        invite_sections = xml.split(marker)
+        if len(invite_sections) >= 3:
+            first_invite = invite_sections[1]
+            second_invite = invite_sections[2]
+            captured["checked"] = (
+                "Authorization: [authentication" not in first_invite
+                and "Authorization: [authentication" in second_invite
+                and xml.count("Authorization: [authentication") == 1
+            )
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = run_voip_probe(settings)
+    assert captured["checked"] is True
+    assert result.completed_call is False
