@@ -1,12 +1,31 @@
 from __future__ import annotations
 
-from telegram import Update
+from datetime import datetime, timedelta, timezone
+import html
+import logging
+import re
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from telegram import Message, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
+import uuid
 
 from src.automations_lib.models import AutomationContext
 from src.automations_lib.orchestrator import StatusOrchestrator
+from src.automations_lib.providers.cep_provider import CepProvider
+from src.automations_lib.providers.network_diagnostics_provider import (
+    NetworkDiagnosticsProvider,
+)
+from src.automations_lib.providers.ssl_provider import SslProvider
+from src.automations_lib.providers.whois_provider import WhoisProvider
 from src.config import Settings
+from src.message_utils import split_message
+from src.state_store import BotStateStore
+
+
+logger = logging.getLogger(__name__)
 
 
 def _command_token(text: str) -> str:
@@ -41,29 +60,50 @@ def is_all_command(text: str, bot_username: str | None = None) -> bool:
     return _is_named_command(text=text, command="all", bot_username=bot_username)
 
 
-def split_message(text: str, max_length: int = 3900) -> list[str]:
-    if len(text) <= max_length:
-        return [text]
-
-    chunks: list[str] = []
-    remaining = text
-    while len(remaining) > max_length:
-        split_at = remaining.rfind("\n", 0, max_length)
-        if split_at <= 0:
-            split_at = max_length
-        chunks.append(remaining[:split_at].rstrip())
-        remaining = remaining[split_at:].lstrip("\n")
-    if remaining:
-        chunks.append(remaining)
-    return chunks
+def is_health_command(text: str, bot_username: str | None = None) -> bool:
+    return _is_named_command(text=text, command="health", bot_username=bot_username)
 
 
 class BotHandlers:
     BLOCKED_MESSAGE = "Acesso nao autorizado para este chat."
+    TAB_ALIAS = {"estudo": "estudos"}
+    TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
-    def __init__(self, settings: Settings, orchestrator: StatusOrchestrator) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        orchestrator: StatusOrchestrator,
+        state_store: BotStateStore | None = None,
+        whois_provider: WhoisProvider | None = None,
+        cep_provider: CepProvider | None = None,
+        network_provider: NetworkDiagnosticsProvider | None = None,
+        ssl_provider: SslProvider | None = None,
+    ) -> None:
         self._settings = settings
         self._orchestrator = orchestrator
+        self._state_store = state_store
+        self._whois_provider = whois_provider or WhoisProvider(
+            timeout_seconds=settings.request_timeout_seconds,
+            global_template=settings.whois_rdap_global_url_template,
+            br_template=settings.whois_rdap_br_url_template,
+        )
+        self._cep_provider = cep_provider or CepProvider(
+            timeout_seconds=settings.request_timeout_seconds,
+            url_template=settings.viacep_url_template,
+        )
+        self._network_provider = network_provider or NetworkDiagnosticsProvider(
+            ping_count=settings.ping_count,
+            ping_timeout_seconds=settings.ping_timeout_seconds,
+            traceroute_max_hops=settings.traceroute_max_hops,
+            traceroute_timeout_seconds=settings.traceroute_timeout_seconds,
+        )
+        self._ssl_provider = ssl_provider or SslProvider(
+            timeout_seconds=settings.ssl_timeout_seconds,
+            alert_days=settings.ssl_alert_days,
+            critical_days=settings.ssl_critical_days,
+        )
+        self._note_tab_map = {key: value for key, value in settings.note_tab_chat_ids}
+        self._tzinfo = _resolve_timezone(settings.bot_timezone)
 
     async def start_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -72,7 +112,8 @@ class BotHandlers:
         if not update.message:
             return
         await update.message.reply_text(
-            "Bot online. Use /status, /host ou /all."
+            "Bot online. Use /status, /host, /health, /whois, /cep, /ping, /ssl, "
+            "/note, /lembrete, /logs ou /all."
         )
 
     async def help_handler(
@@ -82,7 +123,8 @@ class BotHandlers:
         if not update.message:
             return
         await update.message.reply_text(
-            "Comandos: /start, /help, status, /status, /host, /all"
+            "Comandos: /start, /help, status, /status, /host, /health, /whois, "
+            "/cep, /ping, /ssl, /note, /lembrete, /logs, /all"
         )
 
     async def status_handler(
@@ -95,21 +137,510 @@ class BotHandlers:
     ) -> None:
         await self._run_single_trigger(update, context, trigger="host")
 
+    async def health_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        await self._run_single_trigger(update, context, trigger="health")
+
+    async def whois_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        prepared = await self._prepare_command(update, command="/whois")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        raw_target = " ".join(context.args).strip()
+        if not raw_target:
+            await message.reply_text("Uso: /whois dominio.com")
+            return
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command="/whois",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload={"target": raw_target},
+        )
+        try:
+            result = await self._whois_provider.lookup(raw_target)
+            if result.owner or result.owner_c or result.tech_c:
+                lines = [
+                    "<b>WHOIS</b>",
+                    f"domain:      {html.escape(result.domain)}",
+                    f"owner:       {html.escape(result.owner or 'indisponivel')}",
+                    f"owner-c:     {html.escape(result.owner_c or 'indisponivel')}",
+                    f"tech-c:      {html.escape(result.tech_c or 'indisponivel')}",
+                ]
+                for nserver, nsstat, nslastaa in (result.ns_pairs or []):
+                    lines.append(f"nserver:     {html.escape(nserver)}")
+                    lines.append(f"nsstat:      {html.escape(nsstat or '-')}")
+                    lines.append(f"nslastaa:    {html.escape(nslastaa or '-')}")
+                if result.dsrecord:
+                    lines.append(f"dsrecord:    {html.escape(result.dsrecord)}")
+                if result.dsstatus:
+                    lines.append(f"dsstatus:    {html.escape(result.dsstatus)}")
+                if result.dslastok:
+                    lines.append(f"dslastok:    {html.escape(result.dslastok)}")
+                if result.saci:
+                    lines.append(f"saci:        {html.escape(result.saci)}")
+                lines.append(f"created:     {html.escape(result.created_label or '-')}")
+                lines.append(f"changed:     {html.escape(result.changed_label or '-')}")
+                lines.append(f"expires:     {html.escape(result.expires_label or '-')}")
+                lines.append(f"status:      {html.escape(result.status_label or '-')}")
+                lines.append("")
+                if result.nic_hdl_br:
+                    lines.append(f"nic-hdl-br:  {html.escape(result.nic_hdl_br)}")
+                lines.append(f"person:      {html.escape(result.person or result.owner or 'indisponivel')}")
+                lines.append(f"created:     {html.escape(result.nic_created or '-')}")
+                lines.append(f"changed:     {html.escape(result.nic_changed or '-')}")
+            else:
+                lines = [
+                    "<b>WHOIS/RDAP</b>",
+                    f"Dominio: <b>{html.escape(result.domain)}</b>",
+                    f"Registrar: {html.escape(result.registrar or 'indisponivel')}",
+                    f"Status: {html.escape(', '.join(result.statuses) if result.statuses else 'indisponivel')}",
+                    f"Criado em: {html.escape(_format_datetime(result.created_at, self._tzinfo))}",
+                    f"Atualizado em: {html.escape(_format_datetime(result.updated_at, self._tzinfo))}",
+                    f"Expira em: {html.escape(_format_datetime(result.expires_at, self._tzinfo))}",
+                    f"NS: {html.escape(', '.join(result.nameservers) if result.nameservers else 'indisponivel')}",
+                ]
+            await self._reply_chunks(message, "\n".join(lines))
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/whois",
+                context=automation_context,
+                status="ok",
+                severity="info",
+                payload={"domain": result.domain},
+            )
+        except Exception as exc:
+            await message.reply_text(f"Falha no /whois: {exc}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/whois",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": str(exc)},
+            )
+
+    async def cep_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        prepared = await self._prepare_command(update, command="/cep")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        raw_cep = " ".join(context.args).strip()
+        if not raw_cep:
+            await message.reply_text("Uso: /cep 01001000")
+            return
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command="/cep",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload={"cep": raw_cep},
+        )
+        try:
+            info = await self._cep_provider.lookup(raw_cep)
+            lines = [
+                "<b>CEP</b>",
+                f"CEP: {html.escape(info.cep)}",
+                f"Endereco: {html.escape(info.logradouro or '-')}",
+                f"Complemento: {html.escape(info.complemento or '-')}",
+                f"Bairro: {html.escape(info.bairro or '-')}",
+                f"Cidade/UF: {html.escape((info.localidade or '-') + '/' + (info.uf or '-'))}",
+                f"IBGE: {html.escape(info.ibge or '-')}",
+            ]
+            await self._reply_chunks(message, "\n".join(lines))
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/cep",
+                context=automation_context,
+                status="ok",
+                severity="info",
+                payload={"cep": info.cep},
+            )
+        except Exception as exc:
+            await message.reply_text(f"Falha no /cep: {exc}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/cep",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": str(exc)},
+            )
+
+    async def ping_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        prepared = await self._prepare_command(update, command="/ping")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        target = " ".join(context.args).strip()
+        if not target:
+            await message.reply_text("Uso: /ping host")
+            return
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command="/ping",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload={"host": target},
+        )
+        try:
+            diag = await self._network_provider.run(target)
+            ping_status = "OK" if diag.ping.ok else "FALHA"
+            trace_status = "OK" if diag.traceroute.ok else "FALHA"
+            ping_stats = (
+                f"loss={diag.ping.packet_loss_pct}% "
+                f"min/med/max={diag.ping.min_ms}/{diag.ping.avg_ms}/{diag.ping.max_ms}ms"
+            )
+            hops = diag.traceroute.hops[: self._settings.traceroute_max_hops]
+            lines = [
+                "<b>Diagnostico de Rede</b>",
+                f"Host: <b>{html.escape(diag.host)}</b>",
+                f"Ping: {ping_status} | {html.escape(ping_stats)}",
+                f"Traceroute: {trace_status}",
+            ]
+            if hops:
+                lines.append("<b>Hops</b>")
+                for hop in hops:
+                    lines.append(html.escape(hop))
+            if diag.ping.error:
+                lines.append(f"Erro ping: {html.escape(diag.ping.error)}")
+            if diag.traceroute.error:
+                lines.append(f"Erro traceroute: {html.escape(diag.traceroute.error)}")
+            await self._reply_chunks(message, "\n".join(lines))
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/ping",
+                context=automation_context,
+                status="ok",
+                severity="info" if diag.ping.ok and diag.traceroute.ok else "alerta",
+                payload={"host": diag.host, "ping_ok": diag.ping.ok, "trace_ok": diag.traceroute.ok},
+            )
+        except Exception as exc:
+            await message.reply_text(f"Falha no /ping: {exc}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/ping",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": str(exc)},
+            )
+
+    async def ssl_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        prepared = await self._prepare_command(update, command="/ssl")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        target = " ".join(context.args).strip()
+        if not target:
+            await message.reply_text("Uso: /ssl dominio.com ou /ssl dominio.com:443")
+            return
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command="/ssl",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload={"target": target},
+        )
+        try:
+            info = await self._ssl_provider.check(target)
+            lines = [
+                "<b>SSL Check</b>",
+                f"Host: <b>{html.escape(info.host)}</b>",
+                f"Porta: {info.port}",
+                f"Subject CN: {html.escape(info.subject_cn or 'indisponivel')}",
+                f"Issuer CN: {html.escape(info.issuer_cn or 'indisponivel')}",
+                f"Expira em: {html.escape(_format_datetime(info.not_after, self._tzinfo))}",
+                f"Dias restantes: <b>{info.days_remaining}</b>",
+                f"Severidade: <b>{html.escape(info.severity.upper())}</b>",
+            ]
+            await self._reply_chunks(message, "\n".join(lines))
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/ssl",
+                context=automation_context,
+                status="ok",
+                severity=info.severity,
+                payload={"host": info.host, "days_remaining": info.days_remaining},
+            )
+        except Exception as exc:
+            await message.reply_text(f"Falha no /ssl: {exc}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/ssl",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": str(exc)},
+            )
+
+    async def note_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        prepared = await self._prepare_command(update, command="/note")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        if not context.args or len(context.args) < 2:
+            await message.reply_text(
+                "Uso: /note <aba> /<titulo> <texto> ou /note <aba> <texto>"
+            )
+            return
+        raw_tab = context.args[0].strip().lower()
+        tab = self._normalize_tab(raw_tab)
+        if tab not in {"estudos", "dinheiro", "trabalho", "life", "geral"}:
+            await message.reply_text("Aba invalida. Use: estudos, dinheiro, trabalho, life, geral.")
+            return
+        target_chat_id = self._note_tab_map.get(tab)
+        if target_chat_id is None:
+            configured = ", ".join(sorted(self._note_tab_map.keys())) or "(nenhuma)"
+            await message.reply_text(
+                f"NOTE_TAB_CHAT_IDS_JSON sem mapeamento para aba '{tab}'. "
+                f"Abas carregadas: {configured}"
+            )
+            return
+
+        payload = " ".join(context.args[1:]).strip()
+        title, body = self._parse_note_payload(payload)
+        if not title:
+            await message.reply_text("Nota vazia.")
+            return
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command="/note",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload={"tab": tab, "title": title},
+        )
+        source = update.effective_user
+        source_username = source.username if source else None
+        created_local = datetime.now(self._tzinfo)
+        note_lines = [
+            f"<b>/note ({html.escape(tab)})</b>",
+            f"Nota: {html.escape(title)}",
+        ]
+        if body:
+            note_lines.append(f"Texto: {html.escape(body)}")
+        note_lines.append(
+            f"Horario: {html.escape(created_local.strftime('%d/%m/%Y %H:%M'))}"
+        )
+        try:
+            sent = await context.bot.send_message(
+                chat_id=target_chat_id,
+                text="\n".join(note_lines),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:
+            await message.reply_text(
+                f"Falha ao enviar para aba '{tab}': {exc}\n"
+                "Verifique NOTE_TAB_CHAT_IDS_JSON com IDs reais."
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/note",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "tab": tab,
+                    "target_chat_id": target_chat_id,
+                    "error": str(exc),
+                },
+            )
+            return
+        note_id = None
+        if self._state_store is not None:
+            note_id = self._state_store.create_note(
+                tab=tab,
+                title=title,
+                body=body,
+                source_chat_id=automation_context.chat_id,
+                source_user_id=automation_context.user_id,
+                source_username=automation_context.username,
+                target_chat_id=target_chat_id,
+                telegram_message_id=getattr(sent, "message_id", None),
+            )
+        await message.reply_text(
+            f"Nota salva em {tab}. ID: {note_id if note_id is not None else '-'}"
+        )
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_end",
+            command="/note",
+            context=automation_context,
+            status="ok",
+            severity="info",
+            payload={"tab": tab, "note_id": note_id},
+        )
+
+    async def lembrete_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        prepared = await self._prepare_command(update, command="/lembrete")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        if not context.args or len(context.args) < 2:
+            await message.reply_text("Uso: /lembrete HH:MM texto")
+            return
+        match = self.TIME_RE.match(context.args[0].strip())
+        if not match:
+            await message.reply_text("Horario invalido. Use HH:MM (24h).")
+            return
+        note_text = " ".join(context.args[1:]).strip()
+        if not note_text:
+            await message.reply_text("Texto do lembrete nao informado.")
+            return
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        now_local = datetime.now(self._tzinfo)
+        remind_local = now_local.replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+        if remind_local <= now_local:
+            remind_local += timedelta(days=1)
+        remind_utc = remind_local.astimezone(timezone.utc)
+        reminder_id = None
+        if self._state_store is not None and automation_context.chat_id is not None:
+            reminder_id = self._state_store.create_reminder(
+                chat_id=automation_context.chat_id,
+                user_id=automation_context.user_id,
+                username=automation_context.username,
+                text=note_text,
+                remind_at_utc=remind_utc,
+                timezone_name=self._settings.bot_timezone,
+            )
+        await message.reply_text(
+            "Lembrete salvo para "
+            f"{remind_local.strftime('%d/%m/%Y %H:%M')} (ID {reminder_id if reminder_id is not None else '-'})"
+        )
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_end",
+            command="/lembrete",
+            context=automation_context,
+            status="ok",
+            severity="info",
+            payload={"reminder_id": reminder_id, "at": remind_local.isoformat()},
+        )
+
+    async def logs_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        prepared = await self._prepare_command(update, command="/logs")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        if self._state_store is None:
+            await message.reply_text("Audit log indisponivel.")
+            return
+        args = getattr(context, "args", []) or []
+        limit = 20
+        only_error = False
+        if args:
+            first = str(args[0]).strip().lower()
+            if first in {"erro", "error"}:
+                only_error = True
+                if len(args) >= 2:
+                    try:
+                        limit = max(1, min(100, int(args[1])))
+                    except ValueError:
+                        await message.reply_text("Uso: /logs [quantidade] ou /logs erro [quantidade]")
+                        return
+            else:
+                try:
+                    limit = max(1, min(100, int(args[0])))
+                except ValueError:
+                    await message.reply_text("Uso: /logs [quantidade] ou /logs erro [quantidade]")
+                    return
+        events = self._state_store.list_audit_events(limit=limit, only_error=only_error)
+        scope = "erros" if only_error else "eventos"
+        lines = [f"<b>Audit Log (ultimos {len(events)} {scope})</b>"]
+        if not events:
+            lines.append("Sem eventos.")
+        else:
+            for item in events:
+                created = _parse_iso_datetime(item.get("created_at"))
+                created_label = _format_datetime(created, self._tzinfo)
+                event_type = str(item.get("event_type") or "-")
+                command = str(item.get("command") or "-")
+                status = str(item.get("status") or "-")
+                severity = str(item.get("severity") or "-")
+                trace = str(item.get("trace_id") or "-")
+                lines.append(
+                    f"{html.escape(created_label)} | {html.escape(event_type)} | "
+                    f"{html.escape(command)} | {html.escape(status)} | "
+                    f"{html.escape(severity)} | trace={html.escape(trace)}"
+                )
+        await self._reply_chunks(message, "\n".join(lines))
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_end",
+            command="/logs",
+            context=automation_context,
+            status="ok",
+            severity="info",
+            payload={"limit": limit, "returned": len(events), "only_error": only_error},
+        )
+
     async def all_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         del context
-        message = update.effective_message
-        chat = update.effective_chat
-        if not message or not chat:
+        prepared = await self._prepare_command(update, command="/all")
+        if prepared is None:
             return
-        if not self._is_allowed_chat(chat.id):
-            await message.reply_text(self.BLOCKED_MESSAGE)
-            return
-
-        automation_context = AutomationContext(settings=self._settings)
+        message, chat_id, trace_id, automation_context = prepared
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command="/all",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload=None,
+        )
         await self._execute_trigger(message, automation_context, "status")
         await self._execute_trigger(message, automation_context, "host")
+        await self._send_reminder_overview(message, chat_id=chat_id)
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_end",
+            command="/all",
+            context=automation_context,
+            status="ok",
+            severity="info",
+            payload=None,
+        )
 
     async def text_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -117,8 +648,21 @@ class BotHandlers:
         if not update.message or not update.message.text:
             return
         bot_username = context.bot.username.lower() if context.bot.username else None
-        if is_status_command(update.message.text, bot_username=bot_username):
+        text = update.message.text
+        if is_status_command(text, bot_username=bot_username):
             await self._run_single_trigger(update, context, trigger="status")
+        elif is_host_command(text, bot_username=bot_username):
+            await self._run_single_trigger(update, context, trigger="host")
+        elif is_health_command(text, bot_username=bot_username):
+            await self._run_single_trigger(update, context, trigger="health")
+        elif is_all_command(text, bot_username=bot_username):
+            await self.all_handler(update, context)
+
+    async def channel_post_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        del update, context
+        return
 
     async def _run_single_trigger(
         self,
@@ -127,41 +671,259 @@ class BotHandlers:
         trigger: str,
     ) -> None:
         del context
+        prepared = await self._prepare_command(update, command=f"/{trigger}")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command=f"/{trigger}",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload=None,
+        )
+        await self._execute_trigger(message, automation_context, trigger)
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_end",
+            command=f"/{trigger}",
+            context=automation_context,
+            status="ok",
+            severity="info",
+            payload=None,
+        )
+
+    async def _prepare_command(
+        self,
+        update: Update,
+        command: str,
+    ) -> tuple[Message, int, str, AutomationContext] | None:
         message = update.effective_message
         chat = update.effective_chat
         if not message or not chat:
-            return
-
+            return None
+        trace_id = self._new_trace_id()
         if not self._is_allowed_chat(chat.id):
+            await self._handle_unauthorized(update, message.text, trace_id)
             await message.reply_text(self.BLOCKED_MESSAGE)
-            return
-
-        automation_context = AutomationContext(settings=self._settings)
-        await self._execute_trigger(message, automation_context, trigger)
+            return None
+        automation_context = self._build_context(update, trace_id, command=command)
+        return message, chat.id, trace_id, automation_context
 
     async def _execute_trigger(
         self,
-        message,
+        message: Message,
         automation_context: AutomationContext,
         trigger: str,
     ) -> None:
+        logger.info(
+            "trigger requested by chat",
+            extra={
+                "event": "trigger_request",
+                "trace_id": automation_context.trace_id,
+                "trigger": trigger,
+                "chat_id": automation_context.chat_id,
+                "user_id": automation_context.user_id,
+                "username": automation_context.username,
+                "command": automation_context.command,
+            },
+        )
         results = await self._orchestrator.run_trigger(trigger, automation_context)
         if not results:
-            await message.reply_text(
-                f"Nenhuma automacao registrada para {trigger}."
-            )
+            await message.reply_text(f"Nenhuma automacao registrada para {trigger}.")
             return
-
         for result in results:
-            for chunk in split_message(result.message):
-                await message.reply_text(
-                    chunk,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
+            await self._reply_chunks(message, result.message)
+
+    async def _send_reminder_overview(self, message: Message, chat_id: int) -> None:
+        if self._state_store is None:
+            await message.reply_text("<b>Lembretes de hoje</b>\nSem lembretes.", parse_mode=ParseMode.HTML)
+            await message.reply_text("<b>Lembretes de amanha</b>\nSem lembretes.", parse_mode=ParseMode.HTML)
+            return
+        today = datetime.now(self._tzinfo).date()
+        tomorrow = today + timedelta(days=1)
+        today_rows = self._state_store.list_reminders_by_local_date(
+            chat_id=chat_id,
+            date_local=today,
+            timezone_name=self._settings.bot_timezone,
+        )
+        tomorrow_rows = self._state_store.list_reminders_by_local_date(
+            chat_id=chat_id,
+            date_local=tomorrow,
+            timezone_name=self._settings.bot_timezone,
+        )
+        await self._reply_chunks(message, self._format_reminder_lines("hoje", today, today_rows))
+        await self._reply_chunks(
+            message,
+            self._format_reminder_lines("amanha", tomorrow, tomorrow_rows),
+        )
+
+    def _format_reminder_lines(self, label: str, day, rows: list[dict]) -> str:
+        lines = [f"<b>Lembretes de {label} ({day.strftime('%d/%m')})</b>"]
+        if not rows:
+            lines.append("Sem lembretes.")
+            return "\n".join(lines)
+        for item in rows:
+            remind_at = _parse_iso_datetime(item.get("remind_at_utc"))
+            remind_local = (
+                remind_at.astimezone(self._tzinfo).strftime("%H:%M")
+                if remind_at is not None
+                else "--:--"
+            )
+            sent_at = _parse_iso_datetime(item.get("sent_at_utc"))
+            if sent_at is not None:
+                sent_local = sent_at.astimezone(self._tzinfo).strftime("%H:%M")
+                status = f"[ENVIADO {sent_local}]"
+            else:
+                status = "[PENDENTE]"
+            lines.append(
+                f"{remind_local} | {status} {html.escape(str(item.get('text', '')))}"
+            )
+        return "\n".join(lines)
+
+    async def _reply_chunks(self, message: Message, content: str) -> None:
+        for chunk in split_message(content):
+            await message.reply_text(
+                chunk,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+
+    async def _handle_unauthorized(
+        self,
+        update: Update,
+        command_text: str | None,
+        trace_id: str,
+    ) -> None:
+        chat = getattr(update, "effective_chat", None)
+        user = getattr(update, "effective_user", None)
+        chat_id = getattr(chat, "id", None)
+        user_id = getattr(user, "id", None)
+        username = getattr(user, "username", None)
+        logger.warning(
+            "unauthorized access attempt",
+            extra={
+                "event": "unauthorized_attempt",
+                "trace_id": trace_id,
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "username": username,
+                "command": command_text or "",
+            },
+        )
+        if self._state_store is not None:
+            self._state_store.record_unauthorized_attempt(
+                chat_id=chat_id,
+                user_id=user_id,
+                username=username,
+                command_text=command_text,
+                trace_id=trace_id,
+            )
+            self._state_store.record_audit_event(
+                trace_id=trace_id,
+                event_type="unauthorized_attempt",
+                command=command_text,
+                chat_id=chat_id,
+                user_id=user_id,
+                username=username,
+                status="denied",
+                severity="alerta",
+                payload=None,
+            )
+
+    def _build_context(
+        self,
+        update: Update,
+        trace_id: str,
+        command: str,
+    ) -> AutomationContext:
+        chat = getattr(update, "effective_chat", None)
+        user = getattr(update, "effective_user", None)
+        chat_id = getattr(chat, "id", None)
+        user_id = getattr(user, "id", None)
+        username = getattr(user, "username", None)
+        return AutomationContext(
+            settings=self._settings,
+            trace_id=trace_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            username=username,
+            command=command,
+        )
+
+    def _record_audit(
+        self,
+        *,
+        trace_id: str | None,
+        event_type: str,
+        command: str,
+        context: AutomationContext,
+        status: str,
+        severity: str,
+        payload: dict[str, Any] | None,
+    ) -> None:
+        if self._state_store is None:
+            return
+        self._state_store.record_audit_event(
+            trace_id=trace_id,
+            event_type=event_type,
+            command=command,
+            chat_id=context.chat_id,
+            user_id=context.user_id,
+            username=context.username,
+            status=status,
+            severity=severity,
+            payload=payload,
+        )
+
+    def _normalize_tab(self, raw_tab: str) -> str:
+        normalized = raw_tab.strip().lower()
+        return self.TAB_ALIAS.get(normalized, normalized)
+
+    @staticmethod
+    def _parse_note_payload(payload: str) -> tuple[str, str]:
+        text = payload.strip()
+        if not text:
+            return "", ""
+        first, *rest = text.split(maxsplit=1)
+        if first.startswith("/") and len(first) > 1:
+            title = first[1:].strip()
+            body = rest[0].strip() if rest else ""
+            return title, body
+        return text, ""
+
+    @staticmethod
+    def _new_trace_id() -> str:
+        return uuid.uuid4().hex[:12]
 
     def _is_allowed_chat(self, chat_id: int) -> bool:
         allowed_chat_id = self._settings.telegram_allowed_chat_id
         if allowed_chat_id is None:
             return False
         return chat_id == allowed_chat_id
+
+
+def _resolve_timezone(timezone_name: str):
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        if timezone_name == "America/Sao_Paulo":
+            return timezone(timedelta(hours=-3))
+        return timezone.utc
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _format_datetime(value: datetime | None, tzinfo) -> str:
+    if value is None:
+        return "indisponivel"
+    return value.astimezone(tzinfo).strftime("%d/%m/%Y %H:%M")

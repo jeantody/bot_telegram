@@ -1,18 +1,38 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
-
 import pytest
 
-from src.automations_lib.models import AutomationContext, AutomationResult
-from src.automations_lib.orchestrator import StatusOrchestrator
-from src.automations_lib.registry import AutomationRegistry
+from src.automations_lib.automations.status_health import StatusHealthAutomation
+from src.automations_lib.models import AutomationContext
+from src.automations_lib.providers.health_provider import HealthProbe
 from src.config import Settings
 
 
-def settings() -> Settings:
-    return Settings(
+class FakeProvider:
+    async def fetch_health(self, probes):
+        del probes
+        return [
+            HealthProbe(
+                source="A",
+                url="https://ok.example",
+                ok=True,
+                status_code=200,
+                latency_ms=23,
+                error=None,
+            ),
+            HealthProbe(
+                source="B",
+                url="https://fail.example",
+                ok=False,
+                status_code=None,
+                latency_ms=55,
+                error="timeout",
+            ),
+        ]
+
+
+def build_context() -> AutomationContext:
+    settings = Settings(
         telegram_bot_token="token",
         telegram_allowed_chat_id=1,
         request_timeout_seconds=20,
@@ -41,48 +61,17 @@ def settings() -> Settings:
         hostinger_status_page_url="https://statuspage.hostinger.com/",
         host_report_timezone="America/Sao_Paulo",
     )
-
-
-@dataclass
-class SuccessAutomation:
-    name: str = "success"
-    trigger: str = "status"
-
-    async def run(self, context: AutomationContext) -> AutomationResult:
-        del context
-        return AutomationResult(
-            title="ok",
-            message="ok",
-            source_label="success",
-            generated_at=datetime.now(timezone.utc),
-            ok=True,
-        )
-
-
-@dataclass
-class FailingAutomation:
-    name: str = "failing"
-    trigger: str = "status"
-
-    async def run(self, context: AutomationContext) -> AutomationResult:
-        del context
-        raise RuntimeError("boom")
+    return AutomationContext(settings=settings, trace_id="trace-health")
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_continues_after_failure() -> None:
-    registry = AutomationRegistry()
-    registry.register(FailingAutomation())
-    registry.register(SuccessAutomation())
-    orchestrator = StatusOrchestrator(registry, timeout_seconds=5)
+async def test_health_automation_formats_report() -> None:
+    automation = StatusHealthAutomation(provider=FakeProvider())
+    result = await automation.run(build_context())
 
-    results = await orchestrator.run_trigger(
-        "status",
-        AutomationContext(settings=settings()),
-    )
-
-    assert len(results) == 2
-    assert results[0].ok is False
-    assert "Falha ao executar automacao" in results[0].message
-    assert results[1].ok is True
-    assert results[1].message == "ok"
+    assert result.ok is False
+    assert result.severity == "alerta"
+    assert "Health Check" in result.message
+    assert "trace-health" in result.message
+    assert "Falhas por fonte" in result.message
+    assert "timeout" in result.message

@@ -92,6 +92,10 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
     now_iso = _build_day_offset_iso(0, 10, 15)
     yesterday_iso = _build_day_offset_iso(-1, 9, 10)
     two_days_ago_iso = _build_day_offset_iso(-2, 8, 0)
+    today_past_iso = _build_day_offset_iso(0, 0, 30)
+    today_past_end_iso = _build_day_offset_iso(0, 1, 30)
+    yesterday_cross_start_iso = _build_day_offset_iso(-1, 23, 0)
+    yesterday_cross_end_iso = _build_day_offset_iso(0, 0, 0)
     today_future_iso = _build_hours_offset_iso(2)
     today_future_end_iso = _build_hours_offset_iso(3)
     tomorrow_iso = _build_day_offset_iso(1, 23, 0)
@@ -230,6 +234,18 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
                 ],
                 "scheduled_maintenances": [
                     {
+                        "id": "m_yesterday_to_today",
+                        "name": "Maintenance yesterday crossing midnight",
+                        "scheduled_for": yesterday_cross_start_iso,
+                        "scheduled_until": yesterday_cross_end_iso,
+                    },
+                    {
+                        "id": "m_before_now_today",
+                        "name": "Maintenance today past hour",
+                        "scheduled_for": today_past_iso,
+                        "scheduled_until": today_past_end_iso,
+                    },
+                    {
                         "id": "m0",
                         "name": "Maintenance today",
                         "scheduled_for": today_future_iso,
@@ -299,8 +315,10 @@ async def test_fetch_snapshot_parses_locaweb_meta_and_umbrella(monkeypatch) -> N
     assert "pve-node-22" in snapshot.hostinger.vps_components_non_operational
     assert "VPS BR-01" not in snapshot.hostinger.vps_components_non_operational
     assert len(snapshot.hostinger.incidents_active_recent) == 2
-    assert len(snapshot.hostinger.upcoming_maintenances) == 2
+    assert len(snapshot.hostinger.upcoming_maintenances) == 4
     names = {item.name for item in snapshot.hostinger.upcoming_maintenances}
+    assert "Maintenance yesterday crossing midnight" in names
+    assert "Maintenance today past hour" in names
     assert "Maintenance today" in names
     assert "Maintenance future" in names
     assert "Maintenance after tomorrow" not in names

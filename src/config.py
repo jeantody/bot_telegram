@@ -8,6 +8,15 @@ from dotenv import load_dotenv
 
 
 @dataclass(frozen=True)
+class AlertPriorityRule:
+    pattern: str
+    client: str
+    system: str
+    call: bool
+    severity: str
+
+
+@dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
     telegram_allowed_chat_id: int | None
@@ -33,6 +42,28 @@ class Settings:
     hostinger_status_page_url: str
     host_report_timezone: str
     host_site_targets: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    bot_timezone: str = "America/Sao_Paulo"
+    note_tab_chat_ids: tuple[tuple[str, int], ...] = field(default_factory=tuple)
+    whois_rdap_global_url_template: str = "https://rdap.org/domain/{domain}"
+    whois_rdap_br_url_template: str = "https://rdap.registro.br/domain/{domain}"
+    viacep_url_template: str = "https://viacep.com.br/ws/{cep}/json/"
+    ping_count: int = 4
+    ping_timeout_seconds: int = 20
+    traceroute_max_hops: int = 12
+    traceroute_timeout_seconds: int = 30
+    ssl_timeout_seconds: int = 8
+    ssl_alert_days: int = 30
+    ssl_critical_days: int = 7
+    reminder_poll_interval_seconds: int = 15
+    reminder_send_retry_limit: int = 3
+    log_level: str = "INFO"
+    state_db_path: str = "data/bot_state.db"
+    proactive_enabled: bool = True
+    proactive_check_interval_seconds: int = 300
+    proactive_morning_time: str = "08:00"
+    proactive_night_time: str = "21:00"
+    proactive_call_repeat_count: int = 2
+    alert_priority_rules: tuple[AlertPriorityRule, ...] = field(default_factory=tuple)
 
 
 def _read_int(name: str, default: int) -> int:
@@ -45,6 +76,15 @@ def _read_optional_int(name: str) -> int | None:
     if not raw:
         return None
     return int(raw)
+
+
+def _read_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, str(default)).strip().lower()
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
 
 def _read_site_targets(name: str) -> tuple[tuple[str, str], ...]:
@@ -83,8 +123,98 @@ def _read_site_targets(name: str) -> tuple[tuple[str, str], ...]:
     return tuple(normalized)
 
 
+def _read_note_tab_chat_ids(name: str) -> tuple[tuple[str, int], ...]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return ()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid {name}: expected JSON object with tab->chat_id."
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid {name}: expected JSON object.")
+
+    pairs: list[tuple[str, int]] = []
+    for key, value in payload.items():
+        tab = str(key).strip().lower()
+        if not tab:
+            raise ValueError(f"Invalid {name}: tab name cannot be empty.")
+        try:
+            chat_id = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid {name}: chat_id for tab '{tab}' must be integer."
+            ) from exc
+        pairs.append((tab, chat_id))
+    return tuple(sorted(pairs, key=lambda item: item[0]))
+
+
+def _default_priority_rules() -> tuple[AlertPriorityRule, ...]:
+    return (
+        AlertPriorityRule(
+            pattern="rogini",
+            client="Rogini",
+            system="Voip/Chat",
+            call=True,
+            severity="critico",
+        ),
+        AlertPriorityRule(
+            pattern="pet",
+            client="Pet/Sind",
+            system="Voip",
+            call=True,
+            severity="critico",
+        ),
+    )
+
+
+def _read_priority_rules(name: str) -> tuple[AlertPriorityRule, ...]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return _default_priority_rules()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid {name}: expected JSON list of rule objects."
+        ) from exc
+    if not isinstance(payload, list):
+        raise ValueError(f"Invalid {name}: expected a JSON list.")
+
+    rules: list[AlertPriorityRule] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"Invalid {name}: each item must be an object with pattern/client/system."
+            )
+        pattern = str(item.get("pattern", "")).strip().lower()
+        client = str(item.get("client", "")).strip() or "Cliente"
+        system = str(item.get("system", "")).strip() or "Sistema"
+        if not pattern:
+            raise ValueError(f"Invalid {name}: pattern is required for every rule.")
+        call = bool(item.get("call", False))
+        severity = str(item.get("severity", "alerta")).strip().lower()
+        if severity not in {"info", "alerta", "critico"}:
+            raise ValueError(
+                f"Invalid {name}: severity must be info, alerta or critico."
+            )
+        rules.append(
+            AlertPriorityRule(
+                pattern=pattern,
+                client=client,
+                system=system,
+                call=call,
+                severity=severity,
+            )
+        )
+    return tuple(rules)
+
+
 def load_settings() -> Settings:
-    load_dotenv()
+    # Ensure local .env values win over stale shell/system environment values.
+    load_dotenv(override=True)
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -159,9 +289,48 @@ def load_settings() -> Settings:
             "HOSTINGER_STATUS_PAGE_URL",
             "https://statuspage.hostinger.com/",
         ).strip(),
+        bot_timezone=os.getenv("BOT_TIMEZONE", "America/Sao_Paulo").strip(),
         host_report_timezone=os.getenv(
             "HOST_REPORT_TIMEZONE",
             "America/Sao_Paulo",
         ).strip(),
         host_site_targets=_read_site_targets("HOST_SITE_TARGETS_JSON"),
+        note_tab_chat_ids=_read_note_tab_chat_ids("NOTE_TAB_CHAT_IDS_JSON"),
+        whois_rdap_global_url_template=os.getenv(
+            "WHOIS_RDAP_GLOBAL_URL_TEMPLATE",
+            "https://rdap.org/domain/{domain}",
+        ).strip(),
+        whois_rdap_br_url_template=os.getenv(
+            "WHOIS_RDAP_BR_URL_TEMPLATE",
+            "https://rdap.registro.br/domain/{domain}",
+        ).strip(),
+        viacep_url_template=os.getenv(
+            "VIACEP_URL_TEMPLATE",
+            "https://viacep.com.br/ws/{cep}/json/",
+        ).strip(),
+        ping_count=_read_int("PING_COUNT", 4),
+        ping_timeout_seconds=_read_int("PING_TIMEOUT_SECONDS", 20),
+        traceroute_max_hops=_read_int("TRACEROUTE_MAX_HOPS", 12),
+        traceroute_timeout_seconds=_read_int("TRACEROUTE_TIMEOUT_SECONDS", 30),
+        ssl_timeout_seconds=_read_int("SSL_TIMEOUT_SECONDS", 8),
+        ssl_alert_days=_read_int("SSL_ALERT_DAYS", 30),
+        ssl_critical_days=_read_int("SSL_CRITICAL_DAYS", 7),
+        reminder_poll_interval_seconds=_read_int(
+            "REMINDER_POLL_INTERVAL_SECONDS", 15
+        ),
+        reminder_send_retry_limit=_read_int("REMINDER_SEND_RETRY_LIMIT", 3),
+        log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+        state_db_path=os.getenv("STATE_DB_PATH", "data/bot_state.db").strip(),
+        proactive_enabled=_read_bool("PROACTIVE_ENABLED", True),
+        proactive_check_interval_seconds=_read_int(
+            "PROACTIVE_CHECK_INTERVAL_SECONDS", 300
+        ),
+        proactive_morning_time=os.getenv(
+            "PROACTIVE_MORNING_TIME", "08:00"
+        ).strip(),
+        proactive_night_time=os.getenv(
+            "PROACTIVE_NIGHT_TIME", "21:00"
+        ).strip(),
+        proactive_call_repeat_count=_read_int("PROACTIVE_CALL_REPEAT_COUNT", 2),
+        alert_priority_rules=_read_priority_rules("ALERT_PRIORITY_RULES_JSON"),
     )

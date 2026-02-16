@@ -10,9 +10,11 @@ from src.config import Settings
 from src.handlers import (
     BotHandlers,
     is_all_command,
+    is_health_command,
     is_host_command,
     is_status_command,
 )
+from src.state_store import BotStateStore
 
 
 @dataclass
@@ -34,6 +36,15 @@ class FakeUpdate:
         self.message = FakeMessage(text)
         self.effective_message = self.message
         self.effective_chat = FakeChat(chat_id)
+        self.channel_post = None
+
+
+class FakeChannelUpdate:
+    def __init__(self, text: str, chat_id: int) -> None:
+        self.channel_post = FakeMessage(text)
+        self.effective_message = self.channel_post
+        self.effective_chat = FakeChat(chat_id)
+        self.message = None
 
 
 class FakeBot:
@@ -42,8 +53,9 @@ class FakeBot:
 
 
 class FakeContext:
-    def __init__(self, username: str = "bot_teste") -> None:
+    def __init__(self, username: str = "bot_teste", args: list[str] | None = None) -> None:
         self.bot = FakeBot(username=username)
+        self.args = args or []
 
 
 class FakeOrchestrator:
@@ -121,6 +133,13 @@ def test_is_all_command_variants() -> None:
     assert not is_all_command("/all@outro_bot", bot_username="bot_teste")
 
 
+def test_is_health_command_variants() -> None:
+    assert is_health_command("health")
+    assert is_health_command("/health")
+    assert is_health_command("/health@bot_teste", bot_username="bot_teste")
+    assert not is_health_command("/health@outro_bot", bot_username="bot_teste")
+
+
 @pytest.mark.asyncio
 async def test_status_text_sends_four_messages() -> None:
     orchestrator = FakeOrchestrator(
@@ -176,4 +195,93 @@ async def test_all_command_runs_status_then_host() -> None:
     await handlers.all_handler(update, FakeContext())
 
     assert orchestrator.called_triggers == ["status", "host"]
-    assert [r["text"] for r in update.message.replies] == ["s1", "s2", "s3", "s4", "h1"]
+    assert [r["text"] for r in update.message.replies[:5]] == [
+        "s1",
+        "s2",
+        "s3",
+        "s4",
+        "h1",
+    ]
+    assert update.message.replies[5]["text"].startswith("<b>Lembretes de hoje")
+    assert update.message.replies[6]["text"].startswith("<b>Lembretes de amanha")
+
+
+@pytest.mark.asyncio
+async def test_health_command_sends_single_report_message() -> None:
+    orchestrator = FakeOrchestrator({"health": [result("health-report")]})
+    handlers = BotHandlers(settings=build_settings(allowed_chat_id=123), orchestrator=orchestrator)
+    update = FakeUpdate(text="/health", chat_id=123)
+
+    await handlers.health_handler(update, FakeContext())
+
+    assert orchestrator.called_triggers == ["health"]
+    assert [r["text"] for r in update.message.replies] == ["health-report"]
+
+
+@pytest.mark.asyncio
+async def test_logs_command_returns_audit_events(tmp_path) -> None:
+    orchestrator = FakeOrchestrator({})
+    store = BotStateStore(str(tmp_path / "state.db"))
+    store.record_audit_event(
+        trace_id="t1",
+        event_type="command_end",
+        command="/status",
+        chat_id=123,
+        user_id=1,
+        username="tester",
+        status="ok",
+        severity="info",
+        payload={"x": 1},
+    )
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        state_store=store,
+    )
+    update = FakeUpdate(text="/logs", chat_id=123)
+
+    await handlers.logs_handler(update, FakeContext(args=["5"]))
+
+    assert any("Audit Log (ultimos" in item["text"] for item in update.message.replies)
+    assert any("/status" in item["text"] for item in update.message.replies)
+
+
+@pytest.mark.asyncio
+async def test_logs_command_error_filter_returns_only_error_events(tmp_path) -> None:
+    orchestrator = FakeOrchestrator({})
+    store = BotStateStore(str(tmp_path / "state.db"))
+    store.record_audit_event(
+        trace_id="t1",
+        event_type="command_end",
+        command="/status",
+        chat_id=123,
+        user_id=1,
+        username="tester",
+        status="ok",
+        severity="info",
+        payload=None,
+    )
+    store.record_audit_event(
+        trace_id="t2",
+        event_type="command_end",
+        command="/host",
+        chat_id=123,
+        user_id=1,
+        username="tester",
+        status="error",
+        severity="alerta",
+        payload=None,
+    )
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        state_store=store,
+    )
+    update = FakeUpdate(text="/logs erro 5", chat_id=123)
+
+    await handlers.logs_handler(update, FakeContext(args=["erro", "5"]))
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "ultimos 1 erros" in combined
+    assert "/host" in combined
+    assert "/status" not in combined

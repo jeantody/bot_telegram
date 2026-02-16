@@ -603,23 +603,24 @@ class HostStatusProvider:
     def _hostinger_upcoming_maintenances(
         self, maintenances: list[dict]
     ) -> list[HostMaintenance]:
-        now = datetime.now(self._report_tz)
         result: list[HostMaintenance] = []
         for maintenance in maintenances:
             scheduled_for = _parse_dt(maintenance.get("scheduled_for"))
+            scheduled_until = _parse_dt(maintenance.get("scheduled_until"))
             if scheduled_for is None:
                 continue
-            if scheduled_for.astimezone(self._report_tz) <= now:
-                continue
-            if not _is_today_or_tomorrow_in_timezone(
-                scheduled_for, self._report_tz
+            if not (
+                _is_today_or_tomorrow_in_timezone(scheduled_for, self._report_tz)
+                or _is_today_or_tomorrow_in_timezone(
+                    scheduled_until, self._report_tz
+                )
             ):
                 continue
             result.append(
                 HostMaintenance(
                     name=str(maintenance.get("name", "")).strip(),
                     scheduled_for=scheduled_for,
-                    scheduled_until=_parse_dt(maintenance.get("scheduled_until")),
+                    scheduled_until=scheduled_until,
                 )
             )
         result.sort(
