@@ -47,9 +47,9 @@ def parse_probe_metrics(
     if timed_out:
         error = "timeout"
     elif return_code != 0:
-        stderr_clean = (stderr_text or "").strip()
-        if stderr_clean:
-            error = stderr_clean.splitlines()[0][:300]
+        relevant = _extract_relevant_error_line(stderr_text)
+        if relevant:
+            error = relevant
         elif sip_final_code is not None:
             error = f"sip_final_code={sip_final_code}"
         else:
@@ -94,3 +94,44 @@ def _extract_timestamp_ms(line: str) -> int | None:
     fraction_ms = int((fraction_raw + "000")[:3])
     return ((hour * 3600 + minute * 60 + second) * 1000) + fraction_ms
 
+
+def _extract_relevant_error_line(stderr_text: str) -> str | None:
+    lines = [line.strip() for line in (stderr_text or "").splitlines() if line.strip()]
+    if not lines:
+        return None
+
+    keywords = (
+        "authentication",
+        "error",
+        "failed",
+        "invalid",
+        "unable",
+        "cannot",
+        "timeout",
+        "unreachable",
+        "refused",
+        "forbidden",
+    )
+    for line in reversed(lines):
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in keywords):
+            return _sanitize_error_line(line)
+
+    for line in reversed(lines):
+        lowered = line.lower()
+        if "resolving remote host" in lowered or lowered == "done.":
+            continue
+        return _sanitize_error_line(line)
+
+    return _sanitize_error_line(lines[-1])
+
+
+def _sanitize_error_line(line: str) -> str:
+    compact = " ".join(line.split())
+    # Remove timestamp prefix from sipp logs if present.
+    cleaned = re.sub(
+        r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+\d+(?:\.\d+)?:\s*",
+        "",
+        compact,
+    )
+    return cleaned[:300]

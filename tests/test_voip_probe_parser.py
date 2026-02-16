@@ -52,3 +52,21 @@ def test_parse_probe_metrics_uses_fallback_latency_when_trace_missing() -> None:
     )
     assert parsed.setup_latency_ms == 2600
 
+
+def test_parse_probe_metrics_picks_technical_stderr_line() -> None:
+    stderr_text = "\n".join(
+        [
+            "Resolving remote host 'mvtelecom.ddns.net'... Done.",
+            "2026-02-16 17:15:29.275997 1771262129.275997: Authentication keyword without dialog_authentication!",
+        ]
+    )
+    parsed = parse_probe_metrics(
+        trace_text="",
+        stdout_text="",
+        stderr_text=stderr_text,
+        total_duration_ms=120,
+        hold_seconds=5,
+        return_code=255,
+        timed_out=False,
+    )
+    assert parsed.error == "Authentication keyword without dialog_authentication!"
