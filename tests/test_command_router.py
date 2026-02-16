@@ -104,6 +104,25 @@ class FakeVoipProvider:
         ]
 
 
+class FakeVoipProviderLongError(FakeVoipProvider):
+    async def list_logs(self, *, limit: int = 10) -> list[VoipProbeLogEntry]:
+        del limit
+        return [
+            VoipProbeLogEntry(
+                ok=False,
+                target_number="1102",
+                setup_latency_ms=None,
+                sip_final_code=482,
+                error=(
+                    "Unexpected SIP response: received SIP/2.0 482 (Loop Detected) "
+                    "while expecting 100"
+                ),
+                started_at_utc="2026-02-16T09:00:00+00:00",
+                finished_at_utc="2026-02-16T09:00:01+00:00",
+            )
+        ]
+
+
 def build_settings(allowed_chat_id: int | None) -> Settings:
     return Settings(
         telegram_bot_token="token",
@@ -285,6 +304,22 @@ async def test_voip_logs_command_replies_with_history() -> None:
     combined = "\n".join(item["text"] for item in update.message.replies)
     assert "VoIP Logs" in combined
     assert "busy" in combined
+
+
+@pytest.mark.asyncio
+async def test_voip_logs_command_keeps_expected_100_text() -> None:
+    orchestrator = FakeOrchestrator({})
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        voip_provider=FakeVoipProviderLongError(),
+    )
+    update = FakeUpdate(text="/voip_logs 2", chat_id=123)
+
+    await handlers.voip_logs_handler(update, FakeContext(args=["2"]))
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "expecting 100" in combined
 
 
 @pytest.mark.asyncio
