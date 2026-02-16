@@ -70,3 +70,27 @@ def test_parse_probe_metrics_picks_technical_stderr_line() -> None:
         timed_out=False,
     )
     assert parsed.error == "Authentication keyword without dialog_authentication!"
+
+
+def test_parse_probe_metrics_extracts_unexpected_sip_response() -> None:
+    stderr_text = "\n".join(
+        [
+            "Resolving remote host 'mvtelecom.ddns.net'... Done.",
+            "2026-02-16\t17:27:52.228713\t1771262872.228713: Aborting call on unexpected message for Call-Id '1-31553@192.168.3.26': while expecting '100' (index 10), received 'SIP/2.0 482 (Loop Detected)",
+            "Via: SIP/2.0/UDP 192.168.3.26:5060;branch=z9hG4bK",
+            "'",
+        ]
+    )
+    parsed = parse_probe_metrics(
+        trace_text="",
+        stdout_text="",
+        stderr_text=stderr_text,
+        total_duration_ms=140,
+        hold_seconds=5,
+        return_code=1,
+        timed_out=False,
+    )
+    assert (
+        parsed.error
+        == "Unexpected SIP response: received SIP/2.0 482 (Loop Detected) while expecting 100"
+    )

@@ -111,19 +111,29 @@ def _extract_relevant_error_line(stderr_text: str) -> str | None:
         "unreachable",
         "refused",
         "forbidden",
+        "aborting",
+        "unexpected",
     )
     for line in reversed(lines):
+        if _is_noise_line(line):
+            continue
         lowered = line.lower()
         if any(keyword in lowered for keyword in keywords):
             return _sanitize_error_line(line)
 
     for line in reversed(lines):
+        if _is_noise_line(line):
+            continue
         lowered = line.lower()
         if "resolving remote host" in lowered or lowered == "done.":
             continue
         return _sanitize_error_line(line)
 
-    return _sanitize_error_line(lines[-1])
+    for line in reversed(lines):
+        if _is_noise_line(line):
+            continue
+        return _sanitize_error_line(line)
+    return None
 
 
 def _sanitize_error_line(line: str) -> str:
@@ -134,4 +144,34 @@ def _sanitize_error_line(line: str) -> str:
         "",
         compact,
     )
+    abort_match = re.search(
+        r"Aborting call on unexpected message.*?expecting '([^']+)'.*?received '([^']+)",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if abort_match:
+        expecting = abort_match.group(1).strip()
+        received = abort_match.group(2).strip()
+        return (
+            f"Unexpected SIP response: received {received} while expecting {expecting}"
+        )[:300]
     return cleaned[:300]
+
+
+def _is_noise_line(line: str) -> bool:
+    compact = " ".join(line.split())
+    if compact in {"'", '"', "'"}:
+        return True
+    lowered = compact.lower()
+    prefixes = (
+        "via:",
+        "from:",
+        "to:",
+        "call-id:",
+        "cseq:",
+        "server:",
+        "allow:",
+        "supported:",
+        "content-length:",
+    )
+    return lowered.startswith(prefixes)
