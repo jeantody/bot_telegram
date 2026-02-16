@@ -19,6 +19,9 @@ from src.automations_lib.providers.network_diagnostics_provider import (
     NetworkDiagnosticsProvider,
 )
 from src.automations_lib.providers.ssl_provider import SslProvider
+from src.automations_lib.providers.voip_probe_provider import (
+    VoipProbeProvider,
+)
 from src.automations_lib.providers.whois_provider import WhoisProvider
 from src.config import Settings
 from src.message_utils import split_message
@@ -78,6 +81,7 @@ class BotHandlers:
         cep_provider: CepProvider | None = None,
         network_provider: NetworkDiagnosticsProvider | None = None,
         ssl_provider: SslProvider | None = None,
+        voip_provider: VoipProbeProvider | None = None,
     ) -> None:
         self._settings = settings
         self._orchestrator = orchestrator
@@ -102,6 +106,9 @@ class BotHandlers:
             alert_days=settings.ssl_alert_days,
             critical_days=settings.ssl_critical_days,
         )
+        self._voip_provider = voip_provider or VoipProbeProvider(
+            timeout_seconds=max(10, settings.voip_call_timeout_seconds + 10),
+        )
         self._note_tab_map = {key: value for key, value in settings.note_tab_chat_ids}
         self._tzinfo = _resolve_timezone(settings.bot_timezone)
 
@@ -113,7 +120,7 @@ class BotHandlers:
             return
         await update.message.reply_text(
             "Bot online. Use /status, /host, /health, /whois, /cep, /ping, /ssl, "
-            "/note, /lembrete, /logs ou /all."
+            "/voip, /voip_logs, /note, /lembrete, /logs ou /all."
         )
 
     async def help_handler(
@@ -124,7 +131,7 @@ class BotHandlers:
             return
         await update.message.reply_text(
             "Comandos: /start, /help, status, /status, /host, /health, /whois, "
-            "/cep, /ping, /ssl, /note, /lembrete, /logs, /all"
+            "/cep, /ping, /ssl, /voip, /voip_logs, /note, /lembrete, /logs, /all"
         )
 
     async def status_handler(
@@ -393,6 +400,159 @@ class BotHandlers:
                 trace_id=trace_id,
                 event_type="command_end",
                 command="/ssl",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": str(exc)},
+            )
+
+    async def voip_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        del context
+        prepared = await self._prepare_command(update, command="/voip")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command="/voip",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload=None,
+        )
+        try:
+            result = await self._voip_provider.run_once()
+            started = _format_datetime(
+                _parse_iso_datetime(result.started_at_utc), self._tzinfo
+            )
+            finished = _format_datetime(
+                _parse_iso_datetime(result.finished_at_utc), self._tzinfo
+            )
+            lines = [
+                "<b>VoIP Probe</b>",
+                f"Destino: <b>{html.escape(result.target_number)}</b>",
+                f"Status: <b>{'OK' if result.ok else 'FALHA'}</b>",
+                f"Chamada completada: {'sim' if result.completed_call else 'nao'}",
+                f"Sem problemas: {'sim' if result.no_issues else 'nao'}",
+                (
+                    f"Latencia setup: {result.setup_latency_ms} ms"
+                    if result.setup_latency_ms is not None
+                    else "Latencia setup: indisponivel"
+                ),
+                f"Duracao total: {result.total_duration_ms} ms",
+                (
+                    f"Codigo SIP final: {result.sip_final_code}"
+                    if result.sip_final_code is not None
+                    else "Codigo SIP final: indisponivel"
+                ),
+                f"Inicio: {html.escape(started)}",
+                f"Fim: {html.escape(finished)}",
+                f"Erro: {html.escape(result.error or '-')}",
+            ]
+            await self._reply_chunks(message, "\n".join(lines))
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/voip",
+                context=automation_context,
+                status="ok" if result.ok else "error",
+                severity=(
+                    "critico"
+                    if not result.ok
+                    else (
+                        "alerta"
+                        if (
+                            result.setup_latency_ms is not None
+                            and result.setup_latency_ms > self._settings.voip_latency_alert_ms
+                        )
+                        else "info"
+                    )
+                ),
+                payload={
+                    "target_number": result.target_number,
+                    "setup_latency_ms": result.setup_latency_ms,
+                    "sip_final_code": result.sip_final_code,
+                    "error": result.error,
+                },
+            )
+        except Exception as exc:
+            await message.reply_text(f"Falha no /voip: {exc}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/voip",
+                context=automation_context,
+                status="error",
+                severity="critico",
+                payload={"error": str(exc)},
+            )
+
+    async def voip_logs_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        prepared = await self._prepare_command(update, command="/voip_logs")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        limit = 10
+        if context.args:
+            try:
+                limit = max(1, min(50, int(context.args[0])))
+            except ValueError:
+                await message.reply_text("Uso: /voip_logs [quantidade]")
+                return
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command="/voip_logs",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload={"limit": limit},
+        )
+        try:
+            rows = await self._voip_provider.list_logs(limit=limit)
+            lines = [f"<b>VoIP Logs (ultimos {len(rows)})</b>"]
+            if not rows:
+                lines.append("Sem registros.")
+            for row in rows:
+                finished = _format_datetime(
+                    _parse_iso_datetime(row.finished_at_utc), self._tzinfo
+                )
+                status = "OK" if row.ok else "FALHA"
+                latency = (
+                    f"{row.setup_latency_ms}ms"
+                    if row.setup_latency_ms is not None
+                    else "-ms"
+                )
+                sip_code = str(row.sip_final_code) if row.sip_final_code is not None else "-"
+                line = (
+                    f"{html.escape(finished)} | <b>{status}</b> | "
+                    f"lat={html.escape(latency)} | sip={html.escape(sip_code)} | "
+                    f"dest={html.escape(row.target_number or '-')}"
+                )
+                if row.error:
+                    line += f" | erro={html.escape(row.error[:80])}"
+                lines.append(line)
+            await self._reply_chunks(message, "\n".join(lines))
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/voip_logs",
+                context=automation_context,
+                status="ok",
+                severity="info",
+                payload={"limit": limit, "returned": len(rows)},
+            )
+        except Exception as exc:
+            await message.reply_text(f"Falha no /voip_logs: {exc}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/voip_logs",
                 context=automation_context,
                 status="error",
                 severity="alerta",

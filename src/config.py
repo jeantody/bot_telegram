@@ -64,6 +64,23 @@ class Settings:
     proactive_night_time: str = "21:00"
     proactive_call_repeat_count: int = 2
     alert_priority_rules: tuple[AlertPriorityRule, ...] = field(default_factory=tuple)
+    voip_probe_enabled: bool = True
+    voip_sipp_bin: str = "sipp"
+    voip_sip_server: str = "mvtelecom.ddns.net"
+    voip_sip_port: int = 5060
+    voip_sip_transport: str = "udp"
+    voip_sip_domain: str = "mvtelecom.ddns.net"
+    voip_sip_username: str = "1101"
+    voip_sip_login: str = "1101"
+    voip_sip_password: str = ""
+    voip_caller_id: str = "1101"
+    voip_target_number: str = "1102"
+    voip_hold_seconds: int = 5
+    voip_call_timeout_seconds: int = 30
+    voip_probe_interval_seconds: int = 3600
+    voip_latency_alert_ms: int = 1500
+    voip_results_db_path: str = "data/voip_probe.db"
+    voip_alert_chat_id: int | None = None
 
 
 def _read_int(name: str, default: int) -> int:
@@ -333,4 +350,24 @@ def load_settings() -> Settings:
         ).strip(),
         proactive_call_repeat_count=_read_int("PROACTIVE_CALL_REPEAT_COUNT", 2),
         alert_priority_rules=_read_priority_rules("ALERT_PRIORITY_RULES_JSON"),
+        voip_probe_enabled=_read_bool("VOIP_PROBE_ENABLED", True),
+        voip_sipp_bin=os.getenv("VOIP_SIPP_BIN", "sipp").strip(),
+        voip_sip_server=os.getenv("VOIP_SIP_SERVER", "mvtelecom.ddns.net").strip(),
+        voip_sip_port=_read_int("VOIP_SIP_PORT", 5060),
+        voip_sip_transport=os.getenv("VOIP_SIP_TRANSPORT", "udp").strip().lower()
+        or "udp",
+        voip_sip_domain=os.getenv("VOIP_SIP_DOMAIN", "mvtelecom.ddns.net").strip(),
+        voip_sip_username=os.getenv("VOIP_SIP_USERNAME", "1101").strip(),
+        voip_sip_login=os.getenv("VOIP_SIP_LOGIN", "1101").strip(),
+        voip_sip_password=os.getenv("VOIP_SIP_PASSWORD", "").strip(),
+        voip_caller_id=os.getenv("VOIP_CALLER_ID", "1101").strip(),
+        voip_target_number=os.getenv("VOIP_TARGET_NUMBER", "1102").strip(),
+        voip_hold_seconds=_read_int("VOIP_HOLD_SECONDS", 5),
+        voip_call_timeout_seconds=_read_int("VOIP_CALL_TIMEOUT_SECONDS", 30),
+        voip_probe_interval_seconds=_read_int("VOIP_PROBE_INTERVAL_SECONDS", 3600),
+        voip_latency_alert_ms=_read_int("VOIP_LATENCY_ALERT_MS", 1500),
+        voip_results_db_path=os.getenv(
+            "VOIP_RESULTS_DB_PATH", "data/voip_probe.db"
+        ).strip(),
+        voip_alert_chat_id=_read_optional_int("VOIP_ALERT_CHAT_ID"),
     )

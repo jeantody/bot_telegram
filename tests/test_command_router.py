@@ -14,6 +14,10 @@ from src.handlers import (
     is_host_command,
     is_status_command,
 )
+from src.automations_lib.providers.voip_probe_provider import (
+    VoipProbeLogEntry,
+    VoipProbeResult,
+)
 from src.state_store import BotStateStore
 
 
@@ -67,6 +71,37 @@ class FakeOrchestrator:
         del context
         self.called_triggers.append(trigger)
         return self._results_by_trigger.get(trigger, [])
+
+
+class FakeVoipProvider:
+    async def run_once(self) -> VoipProbeResult:
+        return VoipProbeResult(
+            ok=True,
+            completed_call=True,
+            no_issues=True,
+            target_number="1102",
+            hold_seconds=5,
+            setup_latency_ms=850,
+            total_duration_ms=6000,
+            sip_final_code=200,
+            error=None,
+            started_at_utc="2026-02-16T10:00:00+00:00",
+            finished_at_utc="2026-02-16T10:00:06+00:00",
+        )
+
+    async def list_logs(self, *, limit: int = 10) -> list[VoipProbeLogEntry]:
+        del limit
+        return [
+            VoipProbeLogEntry(
+                ok=False,
+                target_number="1102",
+                setup_latency_ms=None,
+                sip_final_code=486,
+                error="busy",
+                started_at_utc="2026-02-16T09:00:00+00:00",
+                finished_at_utc="2026-02-16T09:00:01+00:00",
+            )
+        ]
 
 
 def build_settings(allowed_chat_id: int | None) -> Settings:
@@ -216,6 +251,40 @@ async def test_health_command_sends_single_report_message() -> None:
 
     assert orchestrator.called_triggers == ["health"]
     assert [r["text"] for r in update.message.replies] == ["health-report"]
+
+
+@pytest.mark.asyncio
+async def test_voip_command_runs_probe_and_replies() -> None:
+    orchestrator = FakeOrchestrator({})
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        voip_provider=FakeVoipProvider(),
+    )
+    update = FakeUpdate(text="/voip", chat_id=123)
+
+    await handlers.voip_handler(update, FakeContext())
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "VoIP Probe" in combined
+    assert "Destino" in combined
+
+
+@pytest.mark.asyncio
+async def test_voip_logs_command_replies_with_history() -> None:
+    orchestrator = FakeOrchestrator({})
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        voip_provider=FakeVoipProvider(),
+    )
+    update = FakeUpdate(text="/voip_logs 2", chat_id=123)
+
+    await handlers.voip_logs_handler(update, FakeContext(args=["2"]))
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "VoIP Logs" in combined
+    assert "busy" in combined
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ from src.automations_lib.providers.health_provider import HealthProvider
 from src.automations_lib.providers.host_status_provider import HostStatusProvider
 from src.automations_lib.providers.news_provider import NewsProvider
 from src.automations_lib.providers.trends_provider import TrendsProvider
+from src.automations_lib.providers.voip_probe_provider import VoipProbeProvider
 from src.automations_lib.providers.weather_provider import WeatherProvider
 from src.automations_lib.registry import AutomationRegistry
 from src.config import Settings
@@ -22,6 +23,7 @@ from src.handlers import BotHandlers
 from src.proactive_service import ProactiveService
 from src.reminder_service import ReminderService
 from src.state_store import BotStateStore
+from src.voip_probe_service import VoipProbeService
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,9 @@ async def _post_init(application: Application) -> None:
     reminder = application.bot_data.get("reminder_service")
     if reminder is not None:
         await reminder.start()
+    voip_probe = application.bot_data.get("voip_probe_service")
+    if voip_probe is not None:
+        await voip_probe.start()
 
 
 async def _post_shutdown(application: Application) -> None:
@@ -42,6 +47,9 @@ async def _post_shutdown(application: Application) -> None:
     reminder = application.bot_data.get("reminder_service")
     if reminder is not None:
         await reminder.stop()
+    voip_probe = application.bot_data.get("voip_probe_service")
+    if voip_probe is not None:
+        await voip_probe.stop()
 
 
 async def _error_handler(update, context) -> None:  # pragma: no cover - runtime safety
@@ -78,10 +86,14 @@ def build_application(settings: Settings) -> Application:
     )
 
     orchestrator = StatusOrchestrator(registry, settings.automation_timeout_seconds)
+    voip_provider = VoipProbeProvider(
+        timeout_seconds=max(10, settings.voip_call_timeout_seconds + 10)
+    )
     bot_handlers = BotHandlers(
         settings=settings,
         orchestrator=orchestrator,
         state_store=state_store,
+        voip_provider=voip_provider,
     )
     builder = (
         ApplicationBuilder()
@@ -101,8 +113,15 @@ def build_application(settings: Settings) -> Application:
         settings=settings,
         state_store=state_store,
     )
+    voip_probe_service = VoipProbeService(
+        application=application,
+        settings=settings,
+        state_store=state_store,
+        provider=voip_provider,
+    )
     application.bot_data["proactive_service"] = proactive_service
     application.bot_data["reminder_service"] = reminder_service
+    application.bot_data["voip_probe_service"] = voip_probe_service
 
     application.add_handler(CommandHandler("start", bot_handlers.start_handler))
     application.add_handler(CommandHandler("help", bot_handlers.help_handler))
@@ -114,6 +133,8 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("cep", bot_handlers.cep_handler))
     application.add_handler(CommandHandler("ping", bot_handlers.ping_handler))
     application.add_handler(CommandHandler("ssl", bot_handlers.ssl_handler))
+    application.add_handler(CommandHandler("voip", bot_handlers.voip_handler))
+    application.add_handler(CommandHandler("voip_logs", bot_handlers.voip_logs_handler))
     application.add_handler(CommandHandler("note", bot_handlers.note_handler))
     application.add_handler(CommandHandler("lembrete", bot_handlers.lembrete_handler))
     application.add_handler(CommandHandler("logs", bot_handlers.logs_handler))

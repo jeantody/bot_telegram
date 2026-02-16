@@ -14,6 +14,8 @@ Bot em Python para executar automações pelo Telegram com arquitetura separada 
   - `/cep 01001000`
   - `/ping host` (ping + traceroute)
   - `/ssl dominio.com[:porta]`
+  - `/voip` (teste SIP imediato)
+  - `/voip_logs [quantidade]` (historico de testes VoIP)
   - `/note <aba> /<titulo> <texto>`
   - `/lembrete HH:MM texto`
 - `/host` inclui Hostinger e monitoramento de sites sem API
@@ -63,6 +65,15 @@ Edite `.env`:
 - `PING_COUNT`, `PING_TIMEOUT_SECONDS`, `TRACEROUTE_MAX_HOPS`, `TRACEROUTE_TIMEOUT_SECONDS`: limites do `/ping`
 - `SSL_TIMEOUT_SECONDS`, `SSL_ALERT_DAYS`, `SSL_CRITICAL_DAYS`: limites do `/ssl`
 - `REMINDER_POLL_INTERVAL_SECONDS`, `REMINDER_SEND_RETRY_LIMIT`: despacho e retry de lembretes
+- `VOIP_PROBE_ENABLED`: habilita/desabilita monitor de ligacoes SIP
+- `VOIP_SIPP_BIN`: caminho/binario do SIPp (ex.: `sipp`)
+- `VOIP_SIP_SERVER`, `VOIP_SIP_PORT`, `VOIP_SIP_TRANSPORT`, `VOIP_SIP_DOMAIN`: endpoint SIP
+- `VOIP_SIP_USERNAME`, `VOIP_SIP_LOGIN`, `VOIP_SIP_PASSWORD`, `VOIP_CALLER_ID`: credenciais e origem
+- `VOIP_TARGET_NUMBER`, `VOIP_HOLD_SECONDS`, `VOIP_CALL_TIMEOUT_SECONDS`: destino e timing do teste
+- `VOIP_PROBE_INTERVAL_SECONDS`: intervalo do teste automatico (padrao 3600s)
+- `VOIP_LATENCY_ALERT_MS`: limiar de latencia para alerta
+- `VOIP_RESULTS_DB_PATH`: DB da ferramenta separada (`tools/voip_probe`)
+- `VOIP_ALERT_CHAT_ID`: chat para alertas VoIP (fallback `TELEGRAM_ALLOWED_CHAT_ID`)
 - `LOG_LEVEL`: nivel do logger estruturado (`INFO`, `WARNING`, ...)
 - `STATE_DB_PATH`: caminho do SQLite para estado persistente e tentativas nao autorizadas
 - `PROACTIVE_ENABLED`: habilita/desabilita monitoramento proativo
@@ -86,3 +97,12 @@ pytest -q
 - Nao versione `.env`
 - Mantenha o token apenas no `.env`
 - O token exposto em conversa deve ser rotacionado no BotFather antes de uso em producao
+
+## Ferramenta VoIP Separada
+- Ferramenta em `tools/voip_probe/` (uso externo pela equipe de ferramentas).
+- Execucao manual:
+```powershell
+python tools/voip_probe/main.py run-once --json
+python tools/voip_probe/main.py logs --limit 5 --json
+```
+- Pre-requisito: `sipp` instalado no host de execucao.
