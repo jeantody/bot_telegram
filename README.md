@@ -112,4 +112,5 @@ python tools/voip_probe/main.py run-once --json
 python tools/voip_probe/main.py logs --limit 5 --json
 ```
 - Pre-requisito: `sipp` instalado no host de execucao.
-  aapt install sip-tester
+
+  apt install sip-tester
