@@ -3,12 +3,13 @@
 Bot em Python para executar automações pelo Telegram com arquitetura separada entre:
 - app de Telegram (`src/telegram_app.py`)
 - biblioteca de automações (`src/automations_lib/`)
+- tools (`tools/`) (automações mais complexas que podem ser executadas isoladamente.)
 
 ## Funcionalidades
 - Comando `status` e `/status`
-- Comando `/host` para monitoramento de infraestrutura (Locaweb, Meta e Cisco Umbrella)
+- Comando `/host` para monitoramento de infraestrutura (Locaweb, Meta e Cisco Umbrella e etc)
 - Comando `/health` para latencia e falhas por fonte
-- Comando `/all` para executar `status`, `/host` e listar lembretes de hoje/amanha
+- Comando `/all` para executar `/status`, `/host`, `/voip` e listar lembretes de hoje/amanha
 - Comandos utilitarios:
   - `/whois dominio.com`
   - `/cep 01001000`
@@ -19,7 +20,7 @@ Bot em Python para executar automações pelo Telegram com arquitetura separada 
 - `/voip_logs [quantidade]` (historico de testes VoIP)
   - `/note <aba> /<titulo> <texto>`
   - `/lembrete HH:MM texto`
-- `/host` inclui Hostinger e monitoramento de sites sem API
+- `/host` monitoramento de sites com e sem API
 - Logs estruturados em JSON com `trace_id` por execucao
 - Registro de tentativas nao autorizadas, auditoria e estado em SQLite
 - Monitoramento proativo:
@@ -29,12 +30,12 @@ Bot em Python para executar automações pelo Telegram com arquitetura separada 
 - Envio de 4 mensagens separadas no `status`:
 1. Noticias (Top 10 G1, Top 10 TecMundo, ultimas 5 BoletimSec)
 2. Clima de Sao Paulo (agora, 12:00, 19:00, 21:00, chuva 17:00-19:00)
-3. Trends Brasil (fonte publica alternativa)
+3. Trends X (twitter) Brasil (fonte publica)
 4. Cotacoes financeiras:
    - Bitcoin (BTC/BRL)
    - Dolar (USD/BRL)
    - Euro (EUR/BRL)
-   - B3 (IBOV)
+   - B3 (IBOV) pontos
 
 ## Requisitos
 - Python 3.10+
@@ -80,7 +81,7 @@ Edite `.env`:
 - `VOIP_RESULTS_DB_PATH`: DB da ferramenta separada (`tools/voip_probe`)
 - `VOIP_ALERT_CHAT_ID`: chat para alertas VoIP (fallback `TELEGRAM_ALLOWED_CHAT_ID`)
 - `LOG_LEVEL`: nivel do logger estruturado (`INFO`, `WARNING`, ...)
-- `STATE_DB_PATH`: caminho do SQLite para estado persistente e tentativas nao autorizadas
+- `STATE_DB_PATH`: caminho do SQLite para estado persistente
 - `PROACTIVE_ENABLED`: habilita/desabilita monitoramento proativo
 - `PROACTIVE_CHECK_INTERVAL_SECONDS`: intervalo da checagem periodica
 - `PROACTIVE_MORNING_TIME`: horario do resumo da manha (HH:MM)
@@ -89,25 +90,26 @@ Edite `.env`:
 - `ALERT_PRIORITY_RULES_JSON`: regras de prioridade por cliente/sistema
 
 ## Executar
-```powershell
+```
 python src/main.py
 ```
 
 ## Testes
-```powershell
+```
 pytest -q
 ```
 
 ## Observacoes de seguranca
 - Nao versione `.env`
 - Mantenha o token apenas no `.env`
-- O token exposto em conversa deve ser rotacionado no BotFather antes de uso em producao
+- É indicado rotacionar o token do telegram no BotFather antes de uso em producao.
 
 ## Ferramenta VoIP Separada
-- Ferramenta em `tools/voip_probe/` (uso externo pela equipe de ferramentas).
+- Ferramenta em `tools/voip_probe/` 
 - Execucao manual:
-```powershell
+```
 python tools/voip_probe/main.py run-once --json
 python tools/voip_probe/main.py logs --limit 5 --json
 ```
 - Pre-requisito: `sipp` instalado no host de execucao.
+  aapt install sip-tester
