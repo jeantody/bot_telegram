@@ -161,3 +161,38 @@ async def test_voip_service_alerts_on_high_latency(tmp_path: Path) -> None:
 
     assert len(bot.messages) == 1
     assert "LATENCIA ALTA" in bot.messages[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_voip_service_alerts_on_baseline_deviation(tmp_path: Path) -> None:
+    store = BotStateStore(str(tmp_path / "state.db"))
+    bot = FakeBot()
+    provider = FakeVoipProvider(
+        result=VoipProbeResult(
+            ok=True,
+            completed_call=True,
+            no_issues=True,
+            target_number="1102",
+            hold_seconds=5,
+            setup_latency_ms=900,
+            total_duration_ms=6400,
+            sip_final_code=200,
+            error=None,
+            started_at_utc="2026-02-16T10:00:00+00:00",
+            finished_at_utc="2026-02-16T10:00:06+00:00",
+            summary={
+                "deviation_alert": True,
+                "deviation_reasons": ["latencia acima do baseline em 1102: 900ms"],
+            },
+        )
+    )
+    service = VoipProbeService(
+        application=FakeApp(bot),
+        settings=build_settings(),
+        state_store=store,
+        provider=provider,  # type: ignore[arg-type]
+    )
+    await service._run_probe_once()
+
+    assert len(bot.messages) == 1
+    assert "DESVIO BASELINE" in bot.messages[0]["text"]

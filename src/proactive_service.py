@@ -87,8 +87,12 @@ class ProactiveService:
         results = await self._orchestrator.run_trigger("host", context)
         for result in results:
             state_key = f"proactive:host:{result.title}"
+            severity = self._classify_severity(result)
             signature = self._build_state_signature(result.message)
-            changed, previous = self._state_store.compare_and_set_state(state_key, signature)
+            state_value = f"{severity}|{signature}"
+            changed, previous = self._state_store.compare_and_set_state(
+                state_key, state_value
+            )
             if previous is None:
                 logger.info(
                     "baseline state stored for proactive host check",
@@ -97,9 +101,20 @@ class ProactiveService:
                 continue
             if not changed:
                 continue
-            severity = self._classify_severity(result)
+            previous_severity = self._parse_state_severity(previous)
+            is_recovery = previous_severity in {"alerta", "critico"} and severity == "info"
+            # Periodic notifications should reduce noise: only alert on real problems
+            # (alerta/critico) or when recovering from a previous problem.
+            if severity == "info" and not is_recovery:
+                continue
             rule = self._match_priority_rule(result.message)
-            await self._notify_change(result, trace_id, severity, rule)
+            await self._notify_change(
+                result,
+                trace_id,
+                severity,
+                rule,
+                is_recovery=is_recovery,
+            )
 
     async def _run_daily_summaries_if_due(self, now_local: datetime) -> None:
         date_key = now_local.strftime("%Y-%m-%d")
@@ -135,12 +150,15 @@ class ProactiveService:
         trace_id: str,
         severity: str,
         rule: AlertPriorityRule | None,
+        *,
+        is_recovery: bool = False,
     ) -> None:
         chat_id = self._settings.telegram_allowed_chat_id
         if chat_id is None:
             return
+        title = "Recuperacao Proativa" if is_recovery else "Alerta Proativo"
         header = (
-            f"<b>Alerta Proativo</b>\n"
+            f"<b>{title}</b>\n"
             f"Severidade: <b>{severity.upper()}</b>\n"
             f"Fonte: {result.title}\n"
             f"Trace: <code>{trace_id}</code>"
@@ -209,6 +227,16 @@ class ProactiveService:
             if rule.pattern in text:
                 return rule
         return None
+
+    @staticmethod
+    def _parse_state_severity(state_value: str) -> str:
+        # Stored value format is "{severity}|{signature}". Keep backward compatibility
+        # with older values that stored only the signature.
+        raw = (state_value or "").strip()
+        if "|" not in raw:
+            return "info"
+        prefix = raw.split("|", 1)[0].strip().lower()
+        return prefix if prefix in {"info", "alerta", "critico"} else "info"
 
     def _build_state_signature(self, message: str) -> str:
         lines: list[str] = []

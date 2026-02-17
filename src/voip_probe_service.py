@@ -117,6 +117,9 @@ class VoipProbeService:
     def _should_alert(self, result: VoipProbeResult) -> bool:
         if not result.ok:
             return True
+        summary = result.summary if isinstance(result.summary, dict) else {}
+        if bool(summary.get("deviation_alert")):
+            return True
         return (
             result.setup_latency_ms is not None
             and result.setup_latency_ms > self._settings.voip_latency_alert_ms
@@ -125,6 +128,9 @@ class VoipProbeService:
     def _result_severity(self, result: VoipProbeResult) -> str:
         if not result.ok:
             return "critico"
+        summary = result.summary if isinstance(result.summary, dict) else {}
+        if bool(summary.get("deviation_alert")):
+            return "alerta"
         if (
             result.setup_latency_ms is not None
             and result.setup_latency_ms > self._settings.voip_latency_alert_ms
@@ -135,17 +141,31 @@ class VoipProbeService:
     def _format_alert_message(self, result: VoipProbeResult) -> str:
         started = _format_dt(result.started_at_utc, self._tzinfo)
         finished = _format_dt(result.finished_at_utc, self._tzinfo)
-        status = "FALHA" if not result.ok else "LATENCIA ALTA"
-        return (
+        summary = result.summary if isinstance(result.summary, dict) else {}
+        baseline_alert = bool(summary.get("deviation_alert"))
+        destination = result.failure_destination_number or result.target_number
+        status = "FALHA" if not result.ok else ("DESVIO BASELINE" if baseline_alert else "LATENCIA ALTA")
+        message = (
             "<b>Alerta VoIP</b>\n"
             f"Status: <b>{status}</b>\n"
-            f"Destino: {html.escape(result.target_number)}\n"
+            f"Destino: {html.escape(destination)}\n"
             f"Latencia: {result.setup_latency_ms if result.setup_latency_ms is not None else '-'} ms\n"
             f"Codigo SIP: {result.sip_final_code if result.sip_final_code is not None else '-'}\n"
             f"Inicio: {html.escape(started)}\n"
             f"Fim: {html.escape(finished)}\n"
             f"Erro: {html.escape(result.error or '-')}"
         )
+        if result.failure_stage:
+            message += f"\nEstagio: {html.escape(result.failure_stage)}"
+        if baseline_alert:
+            reasons = summary.get("deviation_reasons")
+            if isinstance(reasons, list) and reasons:
+                message += "\nBaseline:\n"
+                for item in reasons[:3]:
+                    message += f"- {html.escape(str(item)[:180])}\n"
+            else:
+                message += "\nBaseline: desvio detectado."
+        return message.rstrip()
 
 
 def _resolve_timezone(timezone_name: str):
@@ -165,4 +185,3 @@ def _format_dt(value: str, tzinfo) -> str:
     except ValueError:
         return "indisponivel"
     return parsed.astimezone(tzinfo).strftime("%d/%m/%Y %H:%M:%S")
-

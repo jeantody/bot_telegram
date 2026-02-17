@@ -31,12 +31,8 @@ a=sendrecv
   <recv response="407" auth="true" optional="true" next="20" />
 
   <recv response="100" optional="true" />
-  <recv response="180" optional="true" />
-  <recv response="183" optional="true" />
-
-  <recv response="401" auth="true" optional="true" next="20" />
-  <recv response="407" auth="true" optional="true" next="20" />
-
+  <recv response="180" optional="true" next="40" />
+  <recv response="183" optional="true" next="40" />
   <recv response="200" rtd="true" next="30" />
 
   <label id="20" />
@@ -70,11 +66,45 @@ a=sendrecv
   </send>
 
   <recv response="100" optional="true" />
-  <recv response="180" optional="true" />
-  <recv response="183" optional="true" />
-  <recv response="200" rtd="true" />
+  <recv response="180" optional="true" next="41" />
+  <recv response="183" optional="true" next="41" />
+  <recv response="200" rtd="true" next="31" />
 
   <label id="30" />
+
+  <send>
+<![CDATA[
+ACK sip:{{TARGET_NUMBER}}@{{SIP_DOMAIN}} SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+From: "{{CALLER_ID}}" <sip:{{CALLER_ID}}@{{SIP_DOMAIN}}>;tag=[call_number]
+To: <sip:{{TARGET_NUMBER}}@{{SIP_DOMAIN}}>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Contact: <sip:{{CALLER_ID}}@[local_ip]:[local_port]>
+Max-Forwards: 70
+Content-Length: 0
+]]>
+  </send>
+
+  <pause milliseconds="{{HOLD_MS}}" />
+
+  <send retrans="500">
+<![CDATA[
+BYE sip:{{TARGET_NUMBER}}@{{SIP_DOMAIN}} SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+From: "{{CALLER_ID}}" <sip:{{CALLER_ID}}@{{SIP_DOMAIN}}>;tag=[call_number]
+To: <sip:{{TARGET_NUMBER}}@{{SIP_DOMAIN}}>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Contact: <sip:{{CALLER_ID}}@[local_ip]:[local_port]>
+Max-Forwards: 70
+Content-Length: 0
+]]>
+  </send>
+
+  <recv response="200" next="999" />
+
+  <label id="31" />
 
   <send>
 <![CDATA[
@@ -106,5 +136,49 @@ Content-Length: 0
 ]]>
   </send>
 
-  <recv response="200" />
+  <recv response="200" next="999" />
+
+  <label id="40" />
+
+  <send retrans="500">
+<![CDATA[
+CANCEL sip:{{TARGET_NUMBER}}@{{SIP_DOMAIN}} SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+From: "{{CALLER_ID}}" <sip:{{CALLER_ID}}@{{SIP_DOMAIN}}>;tag=[call_number]
+To: <sip:{{TARGET_NUMBER}}@{{SIP_DOMAIN}}>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 CANCEL
+Contact: <sip:{{CALLER_ID}}@[local_ip]:[local_port]>
+Max-Forwards: 70
+Content-Length: 0
+]]>
+  </send>
+
+  <recv response="200" optional="true" />
+  <recv response="200" optional="true" next="30" />
+  <recv response="481" optional="true" next="999" />
+  <recv response="487" next="999" />
+
+  <label id="41" />
+
+  <send retrans="500">
+<![CDATA[
+CANCEL sip:{{TARGET_NUMBER}}@{{SIP_DOMAIN}} SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+From: "{{CALLER_ID}}" <sip:{{CALLER_ID}}@{{SIP_DOMAIN}}>;tag=[call_number]
+To: <sip:{{TARGET_NUMBER}}@{{SIP_DOMAIN}}>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 CANCEL
+Contact: <sip:{{CALLER_ID}}@[local_ip]:[local_port]>
+Max-Forwards: 70
+Content-Length: 0
+]]>
+  </send>
+
+  <recv response="200" optional="true" />
+  <recv response="200" optional="true" next="31" />
+  <recv response="481" optional="true" next="999" />
+  <recv response="487" next="999" />
+
+  <label id="999" />
 </scenario>

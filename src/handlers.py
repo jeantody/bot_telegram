@@ -106,8 +106,12 @@ class BotHandlers:
             alert_days=settings.ssl_alert_days,
             critical_days=settings.ssl_critical_days,
         )
+        voip_timeout_seconds = max(
+            90,
+            (settings.voip_call_timeout_seconds * 7) + 20,
+        )
         self._voip_provider = voip_provider or VoipProbeProvider(
-            timeout_seconds=max(10, settings.voip_call_timeout_seconds + 10),
+            timeout_seconds=voip_timeout_seconds,
         )
         self._note_tab_map = {key: value for key, value in settings.note_tab_chat_ids}
         self._tzinfo = _resolve_timezone(settings.bot_timezone)
@@ -425,34 +429,7 @@ class BotHandlers:
         )
         try:
             result = await self._voip_provider.run_once()
-            started = _format_datetime(
-                _parse_iso_datetime(result.started_at_utc), self._tzinfo
-            )
-            finished = _format_datetime(
-                _parse_iso_datetime(result.finished_at_utc), self._tzinfo
-            )
-            lines = [
-                "<b>VoIP Probe</b>",
-                f"Destino: <b>{html.escape(result.target_number)}</b>",
-                f"Status: <b>{'OK' if result.ok else 'FALHA'}</b>",
-                f"Chamada completada: {'sim' if result.completed_call else 'nao'}",
-                f"Sem problemas: {'sim' if result.no_issues else 'nao'}",
-                (
-                    f"Latencia setup: {result.setup_latency_ms} ms"
-                    if result.setup_latency_ms is not None
-                    else "Latencia setup: indisponivel"
-                ),
-                f"Duracao total: {result.total_duration_ms} ms",
-                (
-                    f"Codigo SIP final: {result.sip_final_code}"
-                    if result.sip_final_code is not None
-                    else "Codigo SIP final: indisponivel"
-                ),
-                f"Inicio: {html.escape(started)}",
-                f"Fim: {html.escape(finished)}",
-                f"Erro: {html.escape(result.error or '-')}",
-            ]
-            await self._reply_chunks(message, "\n".join(lines))
+            await self._reply_chunks(message, self._build_voip_message(result))
             self._record_audit(
                 trace_id=trace_id,
                 event_type="command_end",
@@ -465,8 +442,14 @@ class BotHandlers:
                     else (
                         "alerta"
                         if (
+                            (
+                                isinstance(result.summary, dict)
+                                and bool(result.summary.get("deviation_alert"))
+                            )
+                            or (
                             result.setup_latency_ms is not None
                             and result.setup_latency_ms > self._settings.voip_latency_alert_ms
+                            )
                         )
                         else "info"
                     )
@@ -476,6 +459,12 @@ class BotHandlers:
                     "setup_latency_ms": result.setup_latency_ms,
                     "sip_final_code": result.sip_final_code,
                     "error": result.error,
+                    "category": result.category,
+                    "deviation_alert": (
+                        bool(result.summary.get("deviation_alert"))
+                        if isinstance(result.summary, dict)
+                        else False
+                    ),
                 },
             )
         except Exception as exc:
@@ -489,6 +478,36 @@ class BotHandlers:
                 severity="critico",
                 payload={"error": str(exc)},
             )
+
+    def _build_voip_message(self, result) -> str:
+        started = _format_datetime(_parse_iso_datetime(result.started_at_utc), self._tzinfo)
+        finished = _format_datetime(_parse_iso_datetime(result.finished_at_utc), self._tzinfo)
+        lines = [
+            "<b>VoIP Probe</b>",
+            f"Destino: <b>{html.escape(result.target_number)}</b>",
+            f"Status: <b>{'OK' if result.ok else 'FALHA'}</b>",
+            f"Chamada completada: {'sim' if result.completed_call else 'nao'}",
+            f"Sem problemas: {'sim' if result.no_issues else 'nao'}",
+            (
+                f"Latencia setup: {result.setup_latency_ms} ms"
+                if result.setup_latency_ms is not None
+                else "Latencia setup: indisponivel"
+            ),
+            f"Duracao total: {result.total_duration_ms} ms",
+            (
+                f"Codigo SIP final: {result.sip_final_code}"
+                if result.sip_final_code is not None
+                else "Codigo SIP final: indisponivel"
+            ),
+            f"Inicio: {html.escape(started)}",
+            f"Fim: {html.escape(finished)}",
+            f"Erro: {html.escape(result.error or '-')}",
+        ]
+        lines.extend(self._format_voip_matrix_lines(result))
+        failure_human = self._build_voip_failure_human(result)
+        if failure_human:
+            lines.append(f"Falha: {html.escape(failure_human)}")
+        return "\n".join(lines)
 
     async def voip_logs_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -529,13 +548,24 @@ class BotHandlers:
                     else "-ms"
                 )
                 sip_code = str(row.sip_final_code) if row.sip_final_code is not None else "-"
+                destination = (
+                    row.failure_destination_number
+                    if row.failure_destination_number
+                    else (row.target_number or "-")
+                )
                 line = (
                     f"{html.escape(finished)} | <b>{status}</b> | "
                     f"lat={html.escape(latency)} | sip={html.escape(sip_code)} | "
-                    f"dest={html.escape(row.target_number or '-')}"
+                    f"dest={html.escape(destination)}"
                 )
                 if row.error:
-                    line += f" | erro={html.escape(row.error[:220])}"
+                    line += f" | erro={html.escape(row.error[:260])}"
+                if row.failure_stage:
+                    line += f" | stage={html.escape(row.failure_stage)}"
+                if row.category:
+                    line += f" | cat={html.escape(self._voip_category_label(row.category))}"
+                if row.reason and (row.reason.strip() != (row.error or "").strip()):
+                    line += f" | motivo={html.escape(row.reason[:220])}"
                 lines.append(line)
             await self._reply_chunks(message, "\n".join(lines))
             self._record_audit(
@@ -791,6 +821,7 @@ class BotHandlers:
         )
         await self._execute_trigger(message, automation_context, "status")
         await self._execute_trigger(message, automation_context, "host")
+        await self._execute_voip_in_all(message)
         await self._send_reminder_overview(message, chat_id=chat_id)
         self._record_audit(
             trace_id=trace_id,
@@ -801,6 +832,17 @@ class BotHandlers:
             severity="info",
             payload=None,
         )
+
+    async def _execute_voip_in_all(self, message: Message) -> None:
+        # /all aggregates multiple checks; VoIP errors shouldn't block reminders.
+        try:
+            result = await self._voip_provider.run_once()
+            await self._reply_chunks(message, self._build_voip_message(result))
+        except Exception as exc:
+            await self._reply_chunks(
+                message,
+                f"<b>VoIP Probe</b>\nFalha no /voip: {html.escape(str(exc))}",
+            )
 
     async def text_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1063,6 +1105,99 @@ class BotHandlers:
         if allowed_chat_id is None:
             return False
         return chat_id == allowed_chat_id
+
+    def _format_voip_matrix_lines(self, result) -> list[str]:
+        destinations = result.destinations if isinstance(result.destinations, list) else []
+        if not destinations:
+            return []
+        lines = ["<b>Matriz</b>"]
+        for item in destinations:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "-")
+            number = str(item.get("number") or "-")
+            status = "OK" if bool(item.get("no_issues")) else "FALHA"
+            latency_value = None
+            try:
+                if item.get("setup_latency_ms") is not None:
+                    latency_value = int(item.get("setup_latency_ms"))
+            except (TypeError, ValueError):
+                latency_value = None
+            latency = (
+                f"{latency_value}ms"
+                if latency_value is not None
+                else "-ms"
+            )
+            options = item.get("options") if isinstance(item.get("options"), dict) else {}
+            invite = item.get("invite") if isinstance(item.get("invite"), dict) else {}
+            opt_ok = bool(options.get("ok")) if options else False
+            opt_code = options.get("sip_status_text") or options.get("sip_final_code") or "-"
+            opt_label = f"OK(sip={opt_code})" if opt_ok else f"WARN(sip={opt_code})"
+            inv_ok = bool(invite.get("ok")) if invite else False
+            inv_code = invite.get("sip_status_text") or invite.get("sip_final_code") or "-"
+            inv_label = str(inv_code) if inv_ok else f"FAIL({inv_code})"
+
+            category = self._voip_category_label(str(item.get("category") or ""))
+            row = (
+                f"- {html.escape(key)} {html.escape(number)} | {status} | "
+                f"opt={html.escape(opt_label)} | inv={html.escape(inv_label)} | "
+                f"lat={html.escape(latency)}"
+            )
+            if category != "-":
+                row += f" | cat={html.escape(category)}"
+            lines.append(row)
+        summary = result.summary if isinstance(result.summary, dict) else {}
+        if summary:
+            total = summary.get("total_destinations")
+            failed = summary.get("failed_destinations")
+            success = summary.get("successful_destinations")
+            if total is not None and failed is not None and success is not None:
+                lines.append(f"Resumo: {success}/{total} OK ({failed} falhas)")
+        return lines
+
+    def _build_voip_failure_human(self, result) -> str | None:
+        destinations = result.destinations if isinstance(result.destinations, list) else []
+        failed_items = [item for item in destinations if isinstance(item, dict) and not bool(item.get("no_issues"))]
+        if not failed_items:
+            return None
+        ordered: list[dict] = []
+        for key in ("target", "external", "self"):
+            for item in failed_items:
+                if str(item.get("key") or "") == key:
+                    ordered.append(item)
+        for item in failed_items:
+            if item not in ordered:
+                ordered.append(item)
+        selected = ordered[0]
+        number = str(selected.get("number") or result.target_number or "-")
+        category = str(selected.get("category") or result.category or "")
+        reason = str(selected.get("reason") or result.reason or selected.get("error") or result.error or "")
+        sip_code = selected.get("sip_final_code")
+        sip_text = f"{sip_code}" if sip_code is not None else "sem codigo SIP"
+        if category == "rota_permissao" and "permissao de discagem" in reason.lower():
+            return reason
+        if category == "rota_permissao":
+            return f"rota/permissao para {number} ({sip_text})."
+        if category == "auth":
+            return f"autenticacao SIP para {number} ({sip_text})."
+        if category == "rede_timeout":
+            return f"rede/timeout para {number}."
+        if reason:
+            return reason
+        return f"falha desconhecida para {number} ({sip_text})."
+
+    @staticmethod
+    def _voip_category_label(category: str | None) -> str:
+        normalized = (category or "").strip().lower()
+        if not normalized:
+            return "-"
+        if normalized == "auth":
+            return "auth"
+        if normalized == "rota_permissao":
+            return "rota/permissao"
+        if normalized == "rede_timeout":
+            return "rede/timeout"
+        return normalized
 
 
 def _resolve_timezone(timezone_name: str):
