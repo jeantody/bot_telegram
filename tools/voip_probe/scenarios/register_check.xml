@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<scenario name="voip_probe_register_check">
+  <send retrans="500">
+<![CDATA[
+REGISTER sip:{{SIP_DOMAIN}} SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+From: "{{CALLER_ID}}" <sip:{{CALLER_ID}}@{{SIP_DOMAIN}}>;tag=[call_number]
+To: "{{CALLER_ID}}" <sip:{{CALLER_ID}}@{{SIP_DOMAIN}}>
+Call-ID: [call_id]
+CSeq: 1 REGISTER
+Contact: <sip:{{CALLER_ID}}@[local_ip]:[local_port]>
+Max-Forwards: 70
+Expires: 120
+Content-Length: 0
+]]>
+  </send>
+
+  <recv response="401" auth="true" optional="true" next="20" />
+  <recv response="407" auth="true" optional="true" next="20" />
+  <recv response="200" />
+
+  <label id="20" />
+
+  <send retrans="500">
+<![CDATA[
+REGISTER sip:{{SIP_DOMAIN}} SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+From: "{{CALLER_ID}}" <sip:{{CALLER_ID}}@{{SIP_DOMAIN}}>;tag=[call_number]
+To: "{{CALLER_ID}}" <sip:{{CALLER_ID}}@{{SIP_DOMAIN}}>
+Call-ID: [call_id]
+CSeq: 2 REGISTER
+Contact: <sip:{{CALLER_ID}}@[local_ip]:[local_port]>
+Max-Forwards: 70
+Authorization: [authentication username="{{SIP_LOGIN}}" password="{{SIP_PASSWORD}}"]
+Expires: 120
+Content-Length: 0
+]]>
+  </send>
+
+  <recv response="200" />
+</scenario>

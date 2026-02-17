@@ -56,7 +56,7 @@ def test_due_reminders_and_mark_sent_failed(tmp_path: Path) -> None:
     store.mark_reminder_sent(reminder_id=reminder_id, sent_at_utc=datetime.now(timezone.utc))
     rows = store.list_reminders_by_local_date(
         chat_id=123,
-        date_local=date.today(),
+        date_local=due_time.astimezone(timezone.utc).date(),
         timezone_name="UTC",
     )
     assert rows

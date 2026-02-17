@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import sys
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,15 @@ class VoipProbeResult:
     error: str | None
     started_at_utc: str
     finished_at_utc: str
+    mode: str | None = None
+    run_id: str | None = None
+    category: str | None = None
+    reason: str | None = None
+    prechecks: dict[str, Any] | None = None
+    destinations: list[dict[str, Any]] | None = None
+    summary: dict[str, Any] | None = None
+    failure_destination_number: str | None = None
+    failure_stage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -31,6 +41,11 @@ class VoipProbeLogEntry:
     error: str | None
     started_at_utc: str
     finished_at_utc: str
+    run_id: str | None = None
+    category: str | None = None
+    reason: str | None = None
+    failure_destination_number: str | None = None
+    failure_stage: str | None = None
 
 
 class VoipProbeProvider:
@@ -73,6 +88,14 @@ class VoipProbeProvider:
                     error=str(item.get("error") or "") or None,
                     started_at_utc=str(item.get("started_at_utc") or ""),
                     finished_at_utc=str(item.get("finished_at_utc") or ""),
+                    run_id=str(item.get("run_id") or "") or None,
+                    category=str(item.get("category") or "") or None,
+                    reason=str(item.get("reason") or "") or None,
+                    failure_destination_number=str(
+                        item.get("failure_destination_number") or ""
+                    )
+                    or None,
+                    failure_stage=str(item.get("failure_stage") or "") or None,
                 )
             )
         return output
@@ -90,7 +113,16 @@ class VoipProbeProvider:
                 timeout=self._timeout_seconds,
             )
         except asyncio.TimeoutError as exc:
-            raise RuntimeError("timeout ao executar ferramenta VoIP") from exc
+            if "process" in locals():
+                try:
+                    if process.returncode is None:
+                        process.kill()
+                        await process.communicate()
+                except Exception:
+                    pass
+            raise RuntimeError(
+                "timeout ao executar ferramenta VoIP (processo encerrado)"
+            ) from exc
         except FileNotFoundError as exc:
             raise RuntimeError("python/script do VoIP probe nao encontrado") from exc
 
@@ -137,6 +169,24 @@ class VoipProbeProvider:
             error=str(payload.get("error") or "") or None,
             started_at_utc=str(payload.get("started_at_utc") or ""),
             finished_at_utc=str(payload.get("finished_at_utc") or ""),
+            mode=str(payload.get("mode") or "") or None,
+            run_id=str(payload.get("run_id") or "") or None,
+            category=str(payload.get("category") or "") or None,
+            reason=str(payload.get("reason") or "") or None,
+            prechecks=payload.get("prechecks")
+            if isinstance(payload.get("prechecks"), dict)
+            else None,
+            destinations=payload.get("destinations")
+            if isinstance(payload.get("destinations"), list)
+            else None,
+            summary=payload.get("summary")
+            if isinstance(payload.get("summary"), dict)
+            else None,
+            failure_destination_number=str(
+                payload.get("failure_destination_number") or ""
+            )
+            or None,
+            failure_stage=str(payload.get("failure_stage") or "") or None,
         )
 
 
@@ -147,4 +197,3 @@ def _to_optional_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-

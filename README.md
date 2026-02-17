@@ -14,8 +14,9 @@ Bot em Python para executar automações pelo Telegram com arquitetura separada 
   - `/cep 01001000`
   - `/ping host` (ping + traceroute)
   - `/ssl dominio.com[:porta]`
-  - `/voip` (teste SIP imediato)
-  - `/voip_logs [quantidade]` (historico de testes VoIP)
+- `/voip` (teste SIP imediato)
+  - executa pre-check `REGISTER` + `OPTIONS` e matriz de chamada (`self`, `target`, `externo`)
+- `/voip_logs [quantidade]` (historico de testes VoIP)
   - `/note <aba> /<titulo> <texto>`
   - `/lembrete HH:MM texto`
 - `/host` inclui Hostinger e monitoramento de sites sem API
@@ -70,8 +71,12 @@ Edite `.env`:
 - `VOIP_SIP_SERVER`, `VOIP_SIP_PORT`, `VOIP_SIP_TRANSPORT`, `VOIP_SIP_DOMAIN`: endpoint SIP
 - `VOIP_SIP_USERNAME`, `VOIP_SIP_LOGIN`, `VOIP_SIP_PASSWORD`, `VOIP_CALLER_ID`: credenciais e origem
 - `VOIP_TARGET_NUMBER`, `VOIP_HOLD_SECONDS`, `VOIP_CALL_TIMEOUT_SECONDS`: destino e timing do teste
+- `VOIP_EXTERNAL_REFERENCE_NUMBER`: destino externo obrigatorio da matriz VoIP
 - `VOIP_PROBE_INTERVAL_SECONDS`: intervalo do teste automatico (padrao 3600s)
 - `VOIP_LATENCY_ALERT_MS`: limiar de latencia para alerta
+- `VOIP_BASELINE_WINDOW_DAYS`, `VOIP_BASELINE_MIN_SAMPLES`: janela/minimo de amostras do baseline
+- `VOIP_SUCCESS_DROP_ALERT_PCT_POINTS`: queda minima de sucesso (pontos percentuais) para alerta
+- `VOIP_LATENCY_BASELINE_MULTIPLIER`: multiplicador da media historica para alerta de desvio
 - `VOIP_RESULTS_DB_PATH`: DB da ferramenta separada (`tools/voip_probe`)
 - `VOIP_ALERT_CHAT_ID`: chat para alertas VoIP (fallback `TELEGRAM_ALLOWED_CHAT_ID`)
 - `LOG_LEVEL`: nivel do logger estruturado (`INFO`, `WARNING`, ...)

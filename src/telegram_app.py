@@ -86,8 +86,12 @@ def build_application(settings: Settings) -> Application:
     )
 
     orchestrator = StatusOrchestrator(registry, settings.automation_timeout_seconds)
+    voip_timeout_seconds = max(
+        90,
+        (settings.voip_call_timeout_seconds * 7) + 20,
+    )
     voip_provider = VoipProbeProvider(
-        timeout_seconds=max(10, settings.voip_call_timeout_seconds + 10)
+        timeout_seconds=voip_timeout_seconds
     )
     bot_handlers = BotHandlers(
         settings=settings,

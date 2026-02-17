@@ -87,6 +87,45 @@ class FakeVoipProvider:
             error=None,
             started_at_utc="2026-02-16T10:00:00+00:00",
             finished_at_utc="2026-02-16T10:00:06+00:00",
+            mode="matrix_v1",
+            run_id="run-1",
+            destinations=[
+                {
+                    "key": "self",
+                    "number": "1101",
+                    "no_issues": True,
+                    "setup_latency_ms": 600,
+                    "sip_final_code": 200,
+                    "category": None,
+                    "options": {"ok": True, "sip_final_code": 200, "sip_status_text": "200 OK"},
+                    "invite": {"ok": True, "sip_final_code": 200, "sip_status_text": "200 OK"},
+                },
+                {
+                    "key": "target",
+                    "number": "1102",
+                    "no_issues": True,
+                    "setup_latency_ms": 850,
+                    "sip_final_code": 200,
+                    "category": None,
+                    "options": {"ok": True, "sip_final_code": 200, "sip_status_text": "200 OK"},
+                    "invite": {"ok": True, "sip_final_code": 200, "sip_status_text": "200 OK"},
+                },
+                {
+                    "key": "external",
+                    "number": "11999990000",
+                    "no_issues": True,
+                    "setup_latency_ms": 900,
+                    "sip_final_code": 200,
+                    "category": None,
+                    "options": {"ok": True, "sip_final_code": 200, "sip_status_text": "200 OK"},
+                    "invite": {"ok": True, "sip_final_code": 200, "sip_status_text": "200 OK"},
+                },
+            ],
+            summary={
+                "total_destinations": 3,
+                "successful_destinations": 3,
+                "failed_destinations": 0,
+            },
         )
 
     async def list_logs(self, *, limit: int = 10) -> list[VoipProbeLogEntry]:
@@ -100,6 +139,10 @@ class FakeVoipProvider:
                 error="busy",
                 started_at_utc="2026-02-16T09:00:00+00:00",
                 finished_at_utc="2026-02-16T09:00:01+00:00",
+                category="rota_permissao",
+                reason="permissao de discagem para 1102 (486 Busy Here)",
+                failure_destination_number="1102",
+                failure_stage="invite",
             )
         ]
 
@@ -119,6 +162,10 @@ class FakeVoipProviderLongError(FakeVoipProvider):
                 ),
                 started_at_utc="2026-02-16T09:00:00+00:00",
                 finished_at_utc="2026-02-16T09:00:01+00:00",
+                category="desconhecida",
+                reason="falha desconhecida para 1102 (482 Loop Detected)",
+                failure_destination_number="1102",
+                failure_stage="invite",
             )
         ]
 
@@ -243,7 +290,11 @@ async def test_all_command_runs_status_then_host() -> None:
             "host": [result("h1")],
         }
     )
-    handlers = BotHandlers(settings=build_settings(allowed_chat_id=123), orchestrator=orchestrator)
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        voip_provider=FakeVoipProvider(),
+    )
     update = FakeUpdate(text="/all", chat_id=123)
 
     await handlers.all_handler(update, FakeContext())
@@ -256,8 +307,9 @@ async def test_all_command_runs_status_then_host() -> None:
         "s4",
         "h1",
     ]
-    assert update.message.replies[5]["text"].startswith("<b>Lembretes de hoje")
-    assert update.message.replies[6]["text"].startswith("<b>Lembretes de amanha")
+    assert "VoIP Probe" in update.message.replies[5]["text"]
+    assert update.message.replies[6]["text"].startswith("<b>Lembretes de hoje")
+    assert update.message.replies[7]["text"].startswith("<b>Lembretes de amanha")
 
 
 @pytest.mark.asyncio
@@ -287,6 +339,8 @@ async def test_voip_command_runs_probe_and_replies() -> None:
     combined = "\n".join(item["text"] for item in update.message.replies)
     assert "VoIP Probe" in combined
     assert "Destino" in combined
+    assert "Matriz" in combined
+    assert "Resumo" in combined
 
 
 @pytest.mark.asyncio
@@ -304,6 +358,7 @@ async def test_voip_logs_command_replies_with_history() -> None:
     combined = "\n".join(item["text"] for item in update.message.replies)
     assert "VoIP Logs" in combined
     assert "busy" in combined
+    assert "stage=invite" in combined
 
 
 @pytest.mark.asyncio
