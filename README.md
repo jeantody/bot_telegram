@@ -15,6 +15,7 @@ Bot em Python para executar automações pelo Telegram com arquitetura separada 
   - `/cep 01001000`
   - `/ping host` (ping + traceroute)
   - `/ssl dominio.com[:porta]`
+  - `/voips` (lista ramais VoIP conectados via AMI do Issabel/Asterisk)
 - `/voip` (teste SIP imediato)
   - executa pre-check `REGISTER` + `OPTIONS` e matriz de chamada (`self`, `target`, `externo`)
 - `/voip_logs [quantidade]` (historico de testes VoIP)
@@ -88,6 +89,8 @@ Edite `.env`:
 - `PROACTIVE_NIGHT_TIME`: horario do resumo da noite (HH:MM)
 - `PROACTIVE_CALL_REPEAT_COUNT`: repeticoes do alerta reforcado para criticos
 - `ALERT_PRIORITY_RULES_JSON`: regras de prioridade por cliente/sistema
+- `ISSABEL_AMI_HOST`, `ISSABEL_AMI_PORT`, `ISSABEL_AMI_USERNAME`, `ISSABEL_AMI_SECRET`: acesso ao AMI do Issabel/Asterisk para `/voips`
+- `ISSABEL_AMI_TIMEOUT_SECONDS`, `ISSABEL_AMI_USE_TLS`, `ISSABEL_AMI_PEER_NAME_REGEX`: ajustes do `/voips` (timeout, TLS, filtro de ramais)
 
 ## Executar
 ```

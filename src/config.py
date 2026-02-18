@@ -83,11 +83,30 @@ class Settings:
     voip_alert_chat_id: int | None = None
     rate_limit_voip_seconds: int = 120
     rate_limit_ping_seconds: int = 20
+    issabel_ami_host: str | None = None
+    issabel_ami_port: int = 5038
+    issabel_ami_username: str | None = None
+    issabel_ami_secret: str | None = None
+    issabel_ami_timeout_seconds: int = 8
+    issabel_ami_use_tls: bool = False
+    issabel_ami_peer_name_regex: str = r"^\d+$"
 
 
 def _read_int(name: str, default: int) -> int:
     raw = os.getenv(name, str(default)).strip()
     return int(raw)
+
+
+def _read_int_or_default(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    return int(raw)
+
+
+def _read_optional_str(name: str) -> str | None:
+    raw = os.getenv(name, "").strip()
+    return raw or None
 
 
 def _read_optional_int(name: str) -> int | None:
@@ -374,4 +393,14 @@ def load_settings() -> Settings:
         voip_alert_chat_id=_read_optional_int("VOIP_ALERT_CHAT_ID"),
         rate_limit_voip_seconds=_read_int("RATE_LIMIT_VOIP_SECONDS", 120),
         rate_limit_ping_seconds=_read_int("RATE_LIMIT_PING_SECONDS", 20),
+        issabel_ami_host=_read_optional_str("ISSABEL_AMI_HOST"),
+        issabel_ami_port=_read_int_or_default("ISSABEL_AMI_PORT", 5038),
+        issabel_ami_username=_read_optional_str("ISSABEL_AMI_USERNAME"),
+        issabel_ami_secret=_read_optional_str("ISSABEL_AMI_SECRET"),
+        issabel_ami_timeout_seconds=_read_int_or_default("ISSABEL_AMI_TIMEOUT_SECONDS", 8),
+        issabel_ami_use_tls=_read_bool("ISSABEL_AMI_USE_TLS", False),
+        issabel_ami_peer_name_regex=(
+            (os.getenv("ISSABEL_AMI_PEER_NAME_REGEX", r"^\\d+$").strip() or r"^\\d+$")
+            .replace("\\\\", "\\")
+        ),
     )
