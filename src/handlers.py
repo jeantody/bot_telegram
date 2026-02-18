@@ -912,6 +912,34 @@ class BotHandlers:
             await message.reply_text(self.BLOCKED_MESSAGE)
             return None
         automation_context = self._build_context(update, trace_id, command=command)
+        if self._state_store is not None and command in {"/voip", "/ping"}:
+            cooldown = (
+                self._settings.rate_limit_voip_seconds
+                if command == "/voip"
+                else self._settings.rate_limit_ping_seconds
+            )
+            rate_key = f"rate:{chat.id}:{command}"
+            allowed, retry_after = self._state_store.consume_rate_limit(
+                rate_key, cooldown
+            )
+            if not allowed:
+                await message.reply_text(
+                    f"Rate limit: aguarde {retry_after}s para usar {command} novamente."
+                )
+                self._record_audit(
+                    trace_id=trace_id,
+                    event_type="command_rate_limited",
+                    command=command,
+                    context=automation_context,
+                    status="denied",
+                    severity="info",
+                    payload={
+                        "command": command,
+                        "retry_after_seconds": retry_after,
+                        "cooldown_seconds": cooldown,
+                    },
+                )
+                return None
         return message, chat.id, trace_id, automation_context
 
     async def _execute_trigger(

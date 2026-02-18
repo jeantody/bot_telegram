@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+import logging
 import json
+import math
 from pathlib import Path
 import sqlite3
 import threading
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from src.redaction import redact_payload
+
+
+logger = logging.getLogger(__name__)
 
 
 class BotStateStore:
@@ -15,7 +22,23 @@ class BotStateStore:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(self._db_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._configure_pragmas()
         self._ensure_schema()
+
+    def _configure_pragmas(self) -> None:
+        with self._lock:
+            cursor = self._connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL;")
+                cursor.execute("PRAGMA synchronous=NORMAL;")
+                cursor.execute("PRAGMA busy_timeout=5000;")
+                cursor.execute("PRAGMA foreign_keys=ON;")
+            except Exception:
+                logger.warning(
+                    "failed to configure sqlite pragmas",
+                    extra={"event": "sqlite_pragmas_error"},
+                    exc_info=True,
+                )
 
     def _ensure_schema(self) -> None:
         with self._lock:
@@ -94,6 +117,63 @@ class BotStateStore:
             )
             self._connection.commit()
 
+    def close(self) -> None:
+        with self._lock:
+            try:
+                self._connection.close()
+            except Exception:
+                logger.warning(
+                    "failed to close sqlite connection",
+                    extra={"event": "sqlite_close_error"},
+                    exc_info=True,
+                )
+
+    def consume_rate_limit(
+        self,
+        key: str,
+        min_interval_seconds: int,
+        now_utc: datetime | None = None,
+    ) -> tuple[bool, int]:
+        if min_interval_seconds <= 0:
+            return True, 0
+        now = now_utc or datetime.now(timezone.utc)
+        now = now.astimezone(timezone.utc)
+        now_iso = now.isoformat()
+        with self._lock:
+            cursor = self._connection.cursor()
+            row = cursor.execute(
+                "SELECT state_value FROM monitored_state WHERE state_key = ?",
+                (key,),
+            ).fetchone()
+            last: datetime | None = None
+            if row:
+                raw = row["state_value"]
+                if raw:
+                    try:
+                        last = datetime.fromisoformat(str(raw))
+                    except ValueError:
+                        last = None
+            if last is not None and last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            if last is not None:
+                elapsed = (now - last).total_seconds()
+                remaining = float(min_interval_seconds) - elapsed
+                if remaining > 0:
+                    return False, max(1, int(math.ceil(remaining)))
+
+            cursor.execute(
+                """
+                INSERT INTO monitored_state (state_key, state_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(state_key) DO UPDATE SET
+                    state_value=excluded.state_value,
+                    updated_at=excluded.updated_at
+                """,
+                (key, now_iso, now_iso),
+            )
+            self._connection.commit()
+        return True, 0
+
     def compare_and_set_state(self, key: str, value: str) -> tuple[bool, str | None]:
         now_iso = datetime.now(timezone.utc).isoformat()
         with self._lock:
@@ -160,7 +240,11 @@ class BotStateStore:
         payload: dict | None = None,
     ) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()
-        payload_json = json.dumps(payload, ensure_ascii=False) if payload else None
+        payload_json = (
+            json.dumps(redact_payload(payload), ensure_ascii=False)
+            if payload is not None
+            else None
+        )
         with self._lock:
             cursor = self._connection.cursor()
             cursor.execute(
