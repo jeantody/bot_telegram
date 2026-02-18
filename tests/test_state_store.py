@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 
@@ -136,3 +137,56 @@ def test_list_audit_events_only_error_filters_rows(tmp_path: Path) -> None:
     assert len(events) == 1
     assert events[0]["trace_id"] == "t-err"
     assert events[0]["status"] == "error"
+
+
+def test_consume_rate_limit_blocks_within_interval(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    store = BotStateStore(str(db_path))
+    key = "rate:123:/voip"
+    now = datetime(2026, 2, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    allowed, retry_after = store.consume_rate_limit(key, 120, now_utc=now)
+    assert allowed is True
+    assert retry_after == 0
+
+    allowed, retry_after = store.consume_rate_limit(
+        key, 120, now_utc=now + timedelta(seconds=10)
+    )
+    assert allowed is False
+    assert retry_after == 110
+
+    allowed, retry_after = store.consume_rate_limit(
+        key, 120, now_utc=now + timedelta(seconds=121)
+    )
+    assert allowed is True
+    assert retry_after == 0
+
+
+def test_record_audit_event_redacts_sensitive_payload(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    store = BotStateStore(str(db_path))
+    store.record_audit_event(
+        trace_id="t1",
+        event_type="command_end",
+        command="/status",
+        chat_id=1,
+        user_id=2,
+        username="tester",
+        status="ok",
+        severity="info",
+        payload={
+            "token": "abc",
+            "password": "x",
+            "nested": {"secret": "y"},
+            "url": "https://api.telegram.org/bot123:ABCDEF/getMe",
+        },
+    )
+    events = store.list_audit_events(limit=1)
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert payload is not None
+    assert payload["token"] == "<redacted>"
+    assert payload["password"] == "<redacted>"
+    assert payload["nested"]["secret"] == "<redacted>"
+    assert "ABCDEF" not in payload["url"]
+    assert "api.telegram.org/bot<redacted>" in payload["url"]

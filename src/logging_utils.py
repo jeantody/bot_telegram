@@ -6,6 +6,21 @@ import logging
 import sys
 from typing import Any
 
+from src.redaction import redact_text
+
+
+class RedactingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+            redacted = redact_text(message)
+            record.msg = redacted
+            record.args = ()
+        except Exception:
+            # Best-effort: never fail logging due to redaction.
+            return True
+        return True
+
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -31,7 +46,7 @@ class JsonFormatter(logging.Formatter):
             if value is not None:
                 payload[field_name] = value
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = redact_text(self.formatException(record.exc_info))
         return json.dumps(payload, ensure_ascii=False)
 
 
@@ -40,6 +55,7 @@ def configure_logging(level: str = "INFO") -> None:
     root_logger.handlers.clear()
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
+    handler.addFilter(RedactingFilter())
     root_logger.addHandler(handler)
     root_logger.setLevel(getattr(logging, level.upper(), logging.INFO))
 

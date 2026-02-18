@@ -50,6 +50,16 @@ async def _post_shutdown(application: Application) -> None:
     voip_probe = application.bot_data.get("voip_probe_service")
     if voip_probe is not None:
         await voip_probe.stop()
+    state_store = application.bot_data.get("state_store")
+    if state_store is not None:
+        try:
+            state_store.close()
+        except Exception:
+            logger.warning(
+                "failed to close state store",
+                extra={"event": "state_store_close_error"},
+                exc_info=True,
+            )
 
 
 async def _error_handler(update, context) -> None:  # pragma: no cover - runtime safety
@@ -126,6 +136,7 @@ def build_application(settings: Settings) -> Application:
     application.bot_data["proactive_service"] = proactive_service
     application.bot_data["reminder_service"] = reminder_service
     application.bot_data["voip_probe_service"] = voip_probe_service
+    application.bot_data["state_store"] = state_store
 
     application.add_handler(CommandHandler("start", bot_handlers.start_handler))
     application.add_handler(CommandHandler("help", bot_handlers.help_handler))

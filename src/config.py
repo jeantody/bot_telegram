@@ -81,6 +81,8 @@ class Settings:
     voip_latency_alert_ms: int = 1500
     voip_results_db_path: str = "data/voip_probe.db"
     voip_alert_chat_id: int | None = None
+    rate_limit_voip_seconds: int = 120
+    rate_limit_ping_seconds: int = 20
 
 
 def _read_int(name: str, default: int) -> int:
@@ -370,4 +372,6 @@ def load_settings() -> Settings:
             "VOIP_RESULTS_DB_PATH", "data/voip_probe.db"
         ).strip(),
         voip_alert_chat_id=_read_optional_int("VOIP_ALERT_CHAT_ID"),
+        rate_limit_voip_seconds=_read_int("RATE_LIMIT_VOIP_SECONDS", 120),
+        rate_limit_ping_seconds=_read_int("RATE_LIMIT_PING_SECONDS", 20),
     )
