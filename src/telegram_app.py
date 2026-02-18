@@ -114,6 +114,7 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("cep", bot_handlers.cep_handler))
     application.add_handler(CommandHandler("ping", bot_handlers.ping_handler))
     application.add_handler(CommandHandler("ssl", bot_handlers.ssl_handler))
+    application.add_handler(CommandHandler("voips", bot_handlers.voips_handler))
     application.add_handler(CommandHandler("note", bot_handlers.note_handler))
     application.add_handler(CommandHandler("lembrete", bot_handlers.lembrete_handler))
     application.add_handler(CommandHandler("logs", bot_handlers.logs_handler))

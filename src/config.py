@@ -64,11 +64,30 @@ class Settings:
     proactive_night_time: str = "21:00"
     proactive_call_repeat_count: int = 2
     alert_priority_rules: tuple[AlertPriorityRule, ...] = field(default_factory=tuple)
+    issabel_ami_host: str | None = None
+    issabel_ami_port: int = 5038
+    issabel_ami_username: str | None = None
+    issabel_ami_secret: str | None = None
+    issabel_ami_timeout_seconds: int = 8
+    issabel_ami_use_tls: bool = False
+    issabel_ami_peer_name_regex: str = r"^\d+$"
 
 
 def _read_int(name: str, default: int) -> int:
     raw = os.getenv(name, str(default)).strip()
     return int(raw)
+
+
+def _read_int_or_default(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    return int(raw)
+
+
+def _read_optional_str(name: str) -> str | None:
+    raw = os.getenv(name, "").strip()
+    return raw or None
 
 
 def _read_optional_int(name: str) -> int | None:
@@ -333,4 +352,14 @@ def load_settings() -> Settings:
         ).strip(),
         proactive_call_repeat_count=_read_int("PROACTIVE_CALL_REPEAT_COUNT", 2),
         alert_priority_rules=_read_priority_rules("ALERT_PRIORITY_RULES_JSON"),
+        issabel_ami_host=_read_optional_str("ISSABEL_AMI_HOST"),
+        issabel_ami_port=_read_int_or_default("ISSABEL_AMI_PORT", 5038),
+        issabel_ami_username=_read_optional_str("ISSABEL_AMI_USERNAME"),
+        issabel_ami_secret=_read_optional_str("ISSABEL_AMI_SECRET"),
+        issabel_ami_timeout_seconds=_read_int_or_default("ISSABEL_AMI_TIMEOUT_SECONDS", 8),
+        issabel_ami_use_tls=_read_bool("ISSABEL_AMI_USE_TLS", False),
+        issabel_ami_peer_name_regex=(
+            (os.getenv("ISSABEL_AMI_PEER_NAME_REGEX", r"^\\d+$").strip() or r"^\\d+$")
+            .replace("\\\\", "\\")
+        ),
     )
