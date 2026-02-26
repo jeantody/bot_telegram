@@ -6,7 +6,11 @@ import subprocess
 import pytest
 
 from tools.voip_probe.config import VoipProbeSettings
-from tools.voip_probe.sipp_runner import build_sipp_command, run_voip_probe
+from tools.voip_probe.sipp_runner import (
+    _build_matrix_targets,
+    build_sipp_command,
+    run_voip_probe,
+)
 
 
 def _settings(tmp_path: Path) -> VoipProbeSettings:
@@ -107,6 +111,18 @@ def test_run_voip_probe_renders_auth_challenge_flow(tmp_path: Path, monkeypatch)
     result = run_voip_probe(settings)
     assert captured["checked"] is True
     assert result.mode == "matrix_v1"
-    assert len(result.destinations) == 3
+    assert len(result.destinations) == 2
     assert result.failure_destination_number is None
     assert result.failure_stage is None
+
+
+def test_build_matrix_targets_returns_target_and_external_only(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    targets = _build_matrix_targets(settings)
+
+    assert targets == [
+        ("target", settings.target_number),
+        ("external", settings.external_reference_number),
+    ]
+    assert all(key != "self" for key, _ in targets)

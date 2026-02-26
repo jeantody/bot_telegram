@@ -91,16 +91,6 @@ class FakeVoipProvider:
             run_id="run-1",
             destinations=[
                 {
-                    "key": "self",
-                    "number": "1101",
-                    "no_issues": True,
-                    "setup_latency_ms": 600,
-                    "sip_final_code": 200,
-                    "category": None,
-                    "options": {"ok": True, "sip_final_code": 200, "sip_status_text": "200 OK"},
-                    "invite": {"ok": True, "sip_final_code": 200, "sip_status_text": "200 OK"},
-                },
-                {
                     "key": "target",
                     "number": "1102",
                     "no_issues": True,
@@ -122,33 +112,9 @@ class FakeVoipProvider:
                 },
             ],
             summary={
-                "total_destinations": 3,
-                "successful_destinations": 3,
+                "total_destinations": 2,
+                "successful_destinations": 2,
                 "failed_destinations": 0,
-            },
-            prechecks={
-                "ami": {
-                    "configured": True,
-                    "ok": True,
-                    "warning": False,
-                    "error": None,
-                    "peer_total": 2,
-                    "snapshot_at_utc": "2026-02-16T10:00:00+00:00",
-                    "watched": {
-                        "self": {
-                            "number": "1101",
-                            "connected": True,
-                            "ip": "10.0.0.10",
-                            "port": 5060,
-                            "status": "OK (15 ms)",
-                        },
-                        "target": {
-                            "number": "1102",
-                            "connected": False,
-                        },
-                    },
-                    "peer_name_regex": r"^\d+$",
-                }
             },
         )
 
@@ -363,9 +329,7 @@ async def test_voip_command_runs_probe_and_replies() -> None:
     combined = "\n".join(item["text"] for item in update.message.replies)
     assert "VoIP Probe" in combined
     assert "Destino" in combined
-    assert "AMI: OK" in combined
-    assert "AMI self (1101): online" in combined
-    assert "AMI target (1102): offline/nao encontrado" in combined
+    assert "AMI:" not in combined
     assert "Matriz" in combined
     assert "Resumo" in combined
 

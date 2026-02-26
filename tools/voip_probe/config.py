@@ -44,13 +44,6 @@ class VoipProbeSettings:
     latency_baseline_multiplier: float = 2.0
     latency_alert_ms: int = 1500
     baseline_timezone: str = "America/Sao_Paulo"
-    ami_host: str | None = None
-    ami_port: int = 5038
-    ami_username: str | None = None
-    ami_secret: str | None = None
-    ami_timeout_seconds: int = 8
-    ami_use_tls: bool = False
-    ami_peer_name_regex: str = r"^\d+$"
 
     def validate(self) -> None:
         if not self.sipp_bin:
@@ -121,16 +114,6 @@ def load_settings_from_env(*, validate: bool = True) -> VoipProbeSettings:
         latency_alert_ms=_read_int("VOIP_LATENCY_ALERT_MS", 1500),
         baseline_timezone=os.getenv("BOT_TIMEZONE", "America/Sao_Paulo").strip()
         or "America/Sao_Paulo",
-        ami_host=(os.getenv("ISSABEL_AMI_HOST", "").strip() or None),
-        ami_port=_read_int("ISSABEL_AMI_PORT", 5038),
-        ami_username=(os.getenv("ISSABEL_AMI_USERNAME", "").strip() or None),
-        ami_secret=(os.getenv("ISSABEL_AMI_SECRET", "").strip() or None),
-        ami_timeout_seconds=_read_int("ISSABEL_AMI_TIMEOUT_SECONDS", 8),
-        ami_use_tls=_read_bool("ISSABEL_AMI_USE_TLS", False),
-        ami_peer_name_regex=(
-            (os.getenv("ISSABEL_AMI_PEER_NAME_REGEX", r"^\\d+$").strip() or r"^\\d+$")
-            .replace("\\\\", "\\")
-        ),
     )
     if validate:
         settings.validate()

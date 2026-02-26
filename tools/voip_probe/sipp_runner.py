@@ -418,7 +418,6 @@ def _render_scenario(
 
 def _build_matrix_targets(settings: VoipProbeSettings) -> list[tuple[str, str]]:
     return [
-        ("self", settings.sip_username),
         ("target", settings.target_number),
         ("external", settings.external_reference_number),
     ]

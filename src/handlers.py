@@ -552,11 +552,6 @@ class BotHandlers:
                     "sip_final_code": result.sip_final_code,
                     "error": result.error,
                     "category": result.category,
-                    "ami_warning": (
-                        bool(result.summary.get("ami_warning"))
-                        if isinstance(result.summary, dict)
-                        else False
-                    ),
                     "deviation_alert": (
                         bool(result.summary.get("deviation_alert"))
                         if isinstance(result.summary, dict)
@@ -600,7 +595,6 @@ class BotHandlers:
             f"Fim: {html.escape(finished)}",
             f"Erro: {html.escape(result.error or '-')}",
         ]
-        lines.extend(self._format_voip_ami_lines(result))
         lines.extend(self._format_voip_matrix_lines(result))
         failure_human = self._build_voip_failure_human(result)
         if failure_human:
@@ -1280,51 +1274,6 @@ class BotHandlers:
             if total is not None and failed is not None and success is not None:
                 lines.append(f"Resumo: {success}/{total} OK ({failed} falhas)")
         return lines
-
-    def _format_voip_ami_lines(self, result) -> list[str]:
-        prechecks = result.prechecks if isinstance(result.prechecks, dict) else {}
-        ami = prechecks.get("ami")
-        if not isinstance(ami, dict):
-            return []
-
-        configured = bool(ami.get("configured"))
-        ok = bool(ami.get("ok"))
-        warning = bool(ami.get("warning"))
-        peer_total = ami.get("peer_total")
-        error = str(ami.get("error") or "") or None
-        lines: list[str] = []
-        if not configured:
-            lines.append("AMI: nao configurado")
-        elif warning and not ok:
-            lines.append(f"AMI: WARN | {html.escape(error or 'falha ao consultar AMI')}")
-        else:
-            total_text = str(peer_total) if peer_total is not None else "-"
-            lines.append(f"AMI: OK | peers filtrados: {html.escape(total_text)}")
-
-        watched = ami.get("watched")
-        if isinstance(watched, dict):
-            if isinstance(watched.get("self"), dict):
-                lines.append(self._format_ami_watched_line("self", watched["self"]))
-            if isinstance(watched.get("target"), dict):
-                lines.append(self._format_ami_watched_line("target", watched["target"]))
-            if isinstance(watched.get("external"), dict):
-                lines.append(self._format_ami_watched_line("external", watched["external"]))
-        return lines
-
-    @staticmethod
-    def _format_ami_watched_line(label: str, item: dict) -> str:
-        number = str(item.get("number") or "-")
-        connected = bool(item.get("connected"))
-        if not connected:
-            return f"AMI {label} ({html.escape(number)}): offline/nao encontrado"
-        ip = str(item.get("ip") or "-")
-        port = item.get("port")
-        addr = f"{ip}:{port}" if port not in (None, "") else ip
-        status = str(item.get("status") or "").strip()
-        line = f"AMI {label} ({html.escape(number)}): online {html.escape(addr)}"
-        if status:
-            line += f" | {html.escape(status)}"
-        return line
 
     def _build_voip_failure_human(self, result) -> str | None:
         destinations = result.destinations if isinstance(result.destinations, list) else []
