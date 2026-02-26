@@ -14,7 +14,9 @@ import uuid
 
 from src.automations_lib.models import AutomationContext
 from src.automations_lib.orchestrator import StatusOrchestrator
+from src.automations_lib.providers.ami_client import AmiError
 from src.automations_lib.providers.cep_provider import CepProvider
+from src.automations_lib.providers.issabel_ami_provider import IssabelAmiProvider
 from src.automations_lib.providers.network_diagnostics_provider import (
     NetworkDiagnosticsProvider,
 )
@@ -82,6 +84,7 @@ class BotHandlers:
         network_provider: NetworkDiagnosticsProvider | None = None,
         ssl_provider: SslProvider | None = None,
         voip_provider: VoipProbeProvider | None = None,
+        issabel_provider: IssabelAmiProvider | None = None,
     ) -> None:
         self._settings = settings
         self._orchestrator = orchestrator
@@ -113,6 +116,15 @@ class BotHandlers:
         self._voip_provider = voip_provider or VoipProbeProvider(
             timeout_seconds=voip_timeout_seconds,
         )
+        self._issabel_provider = issabel_provider or IssabelAmiProvider(
+            host=settings.issabel_ami_host,
+            port=settings.issabel_ami_port,
+            username=settings.issabel_ami_username,
+            secret=settings.issabel_ami_secret,
+            timeout_seconds=settings.issabel_ami_timeout_seconds,
+            use_tls=settings.issabel_ami_use_tls,
+            peer_name_regex=settings.issabel_ami_peer_name_regex,
+        )
         self._note_tab_map = {key: value for key, value in settings.note_tab_chat_ids}
         self._tzinfo = _resolve_timezone(settings.bot_timezone)
 
@@ -124,7 +136,7 @@ class BotHandlers:
             return
         await update.message.reply_text(
             "Bot online. Use /status, /host, /health, /whois, /cep, /ping, /ssl, "
-            "/voip, /voip_logs, /note, /lembrete, /logs ou /all."
+            "/voips, /voip, /voip_logs, /note, /lembrete, /logs ou /all."
         )
 
     async def help_handler(
@@ -135,7 +147,7 @@ class BotHandlers:
             return
         await update.message.reply_text(
             "Comandos: /start, /help, status, /status, /host, /health, /whois, "
-            "/cep, /ping, /ssl, /voip, /voip_logs, /note, /lembrete, /logs, /all"
+            "/cep, /ping, /ssl, /voips, /voip, /voip_logs, /note, /lembrete, /logs, /all"
         )
 
     async def status_handler(
@@ -410,6 +422,86 @@ class BotHandlers:
                 payload={"error": str(exc)},
             )
 
+    async def voips_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        del context
+        prepared = await self._prepare_command(update, command="/voips")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command="/voips",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload=None,
+        )
+        try:
+            peers = await self._issabel_provider.list_connected_voips()
+            lines = [
+                "<b>VoIPs conectados (SIP)</b>",
+                f"Trace: <code>{html.escape(trace_id)}</code>",
+                f"Total: <b>{len(peers)}</b>",
+            ]
+            if not peers:
+                lines.append("Sem ramais conectados.")
+            else:
+                for peer in peers:
+                    addr = f"{peer.ip}:{peer.port}" if peer.port is not None else peer.ip
+                    line = f"- {html.escape(peer.name)}: {html.escape(addr)}"
+                    if peer.status:
+                        line += f" | {html.escape(peer.status)}"
+                    lines.append(line)
+            await self._reply_chunks(message, "\n".join(lines))
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/voips",
+                context=automation_context,
+                status="ok",
+                severity="info",
+                payload={"count": len(peers)},
+            )
+        except ValueError:
+            await message.reply_text(
+                "ISSABEL AMI nao configurado. Configure "
+                "ISSABEL_AMI_HOST/ISSABEL_AMI_USERNAME/ISSABEL_AMI_SECRET."
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/voips",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": "not_configured"},
+            )
+        except AmiError as exc:
+            await message.reply_text(f"Falha no /voips: {exc}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/voips",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": str(exc)},
+            )
+        except Exception as exc:
+            await message.reply_text(f"Falha no /voips: {exc}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/voips",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": str(exc)},
+            )
+
     async def voip_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -460,6 +552,11 @@ class BotHandlers:
                     "sip_final_code": result.sip_final_code,
                     "error": result.error,
                     "category": result.category,
+                    "ami_warning": (
+                        bool(result.summary.get("ami_warning"))
+                        if isinstance(result.summary, dict)
+                        else False
+                    ),
                     "deviation_alert": (
                         bool(result.summary.get("deviation_alert"))
                         if isinstance(result.summary, dict)
@@ -503,6 +600,7 @@ class BotHandlers:
             f"Fim: {html.escape(finished)}",
             f"Erro: {html.escape(result.error or '-')}",
         ]
+        lines.extend(self._format_voip_ami_lines(result))
         lines.extend(self._format_voip_matrix_lines(result))
         failure_human = self._build_voip_failure_human(result)
         if failure_human:
@@ -1182,6 +1280,51 @@ class BotHandlers:
             if total is not None and failed is not None and success is not None:
                 lines.append(f"Resumo: {success}/{total} OK ({failed} falhas)")
         return lines
+
+    def _format_voip_ami_lines(self, result) -> list[str]:
+        prechecks = result.prechecks if isinstance(result.prechecks, dict) else {}
+        ami = prechecks.get("ami")
+        if not isinstance(ami, dict):
+            return []
+
+        configured = bool(ami.get("configured"))
+        ok = bool(ami.get("ok"))
+        warning = bool(ami.get("warning"))
+        peer_total = ami.get("peer_total")
+        error = str(ami.get("error") or "") or None
+        lines: list[str] = []
+        if not configured:
+            lines.append("AMI: nao configurado")
+        elif warning and not ok:
+            lines.append(f"AMI: WARN | {html.escape(error or 'falha ao consultar AMI')}")
+        else:
+            total_text = str(peer_total) if peer_total is not None else "-"
+            lines.append(f"AMI: OK | peers filtrados: {html.escape(total_text)}")
+
+        watched = ami.get("watched")
+        if isinstance(watched, dict):
+            if isinstance(watched.get("self"), dict):
+                lines.append(self._format_ami_watched_line("self", watched["self"]))
+            if isinstance(watched.get("target"), dict):
+                lines.append(self._format_ami_watched_line("target", watched["target"]))
+            if isinstance(watched.get("external"), dict):
+                lines.append(self._format_ami_watched_line("external", watched["external"]))
+        return lines
+
+    @staticmethod
+    def _format_ami_watched_line(label: str, item: dict) -> str:
+        number = str(item.get("number") or "-")
+        connected = bool(item.get("connected"))
+        if not connected:
+            return f"AMI {label} ({html.escape(number)}): offline/nao encontrado"
+        ip = str(item.get("ip") or "-")
+        port = item.get("port")
+        addr = f"{ip}:{port}" if port not in (None, "") else ip
+        status = str(item.get("status") or "").strip()
+        line = f"AMI {label} ({html.escape(number)}): online {html.escape(addr)}"
+        if status:
+            line += f" | {html.escape(status)}"
+        return line
 
     def _build_voip_failure_human(self, result) -> str | None:
         destinations = result.destinations if isinstance(result.destinations, list) else []

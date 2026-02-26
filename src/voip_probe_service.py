@@ -118,6 +118,8 @@ class VoipProbeService:
         if not result.ok:
             return True
         summary = result.summary if isinstance(result.summary, dict) else {}
+        if bool(summary.get("ami_warning")):
+            return True
         if bool(summary.get("deviation_alert")):
             return True
         return (
@@ -129,6 +131,8 @@ class VoipProbeService:
         if not result.ok:
             return "critico"
         summary = result.summary if isinstance(result.summary, dict) else {}
+        if bool(summary.get("ami_warning")):
+            return "alerta"
         if bool(summary.get("deviation_alert")):
             return "alerta"
         if (
@@ -142,9 +146,27 @@ class VoipProbeService:
         started = _format_dt(result.started_at_utc, self._tzinfo)
         finished = _format_dt(result.finished_at_utc, self._tzinfo)
         summary = result.summary if isinstance(result.summary, dict) else {}
+        ami_warning = bool(summary.get("ami_warning"))
+        ami_warning_reason = str(summary.get("ami_warning_reason") or "").strip() or None
         baseline_alert = bool(summary.get("deviation_alert"))
         destination = result.failure_destination_number or result.target_number
-        status = "FALHA" if not result.ok else ("DESVIO BASELINE" if baseline_alert else "LATENCIA ALTA")
+        high_latency = (
+            result.setup_latency_ms is not None
+            and result.setup_latency_ms > self._settings.voip_latency_alert_ms
+        )
+        if not result.ok:
+            status = "FALHA"
+        elif baseline_alert:
+            status = "DESVIO BASELINE"
+        elif ami_warning:
+            status = "AMI WARN"
+        elif high_latency:
+            status = "LATENCIA ALTA"
+        else:
+            status = "INFO"
+        error_text = result.error or "-"
+        if result.ok and ami_warning and ami_warning_reason:
+            error_text = ami_warning_reason
         message = (
             "<b>Alerta VoIP</b>\n"
             f"Status: <b>{status}</b>\n"
@@ -153,10 +175,12 @@ class VoipProbeService:
             f"Codigo SIP: {result.sip_final_code if result.sip_final_code is not None else '-'}\n"
             f"Inicio: {html.escape(started)}\n"
             f"Fim: {html.escape(finished)}\n"
-            f"Erro: {html.escape(result.error or '-')}"
+            f"Erro: {html.escape(error_text)}"
         )
         if result.failure_stage:
             message += f"\nEstagio: {html.escape(result.failure_stage)}"
+        if ami_warning and not (result.ok and ami_warning_reason):
+            message += f"\nAMI: {html.escape(ami_warning_reason or 'warn')}"
         if baseline_alert:
             reasons = summary.get("deviation_reasons")
             if isinstance(reasons, list) and reasons:

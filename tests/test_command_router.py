@@ -126,6 +126,30 @@ class FakeVoipProvider:
                 "successful_destinations": 3,
                 "failed_destinations": 0,
             },
+            prechecks={
+                "ami": {
+                    "configured": True,
+                    "ok": True,
+                    "warning": False,
+                    "error": None,
+                    "peer_total": 2,
+                    "snapshot_at_utc": "2026-02-16T10:00:00+00:00",
+                    "watched": {
+                        "self": {
+                            "number": "1101",
+                            "connected": True,
+                            "ip": "10.0.0.10",
+                            "port": 5060,
+                            "status": "OK (15 ms)",
+                        },
+                        "target": {
+                            "number": "1102",
+                            "connected": False,
+                        },
+                    },
+                    "peer_name_regex": r"^\d+$",
+                }
+            },
         )
 
     async def list_logs(self, *, limit: int = 10) -> list[VoipProbeLogEntry]:
@@ -339,6 +363,9 @@ async def test_voip_command_runs_probe_and_replies() -> None:
     combined = "\n".join(item["text"] for item in update.message.replies)
     assert "VoIP Probe" in combined
     assert "Destino" in combined
+    assert "AMI: OK" in combined
+    assert "AMI self (1101): online" in combined
+    assert "AMI target (1102): offline/nao encontrado" in combined
     assert "Matriz" in combined
     assert "Resumo" in combined
 

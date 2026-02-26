@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 from argparse import ArgumentParser
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import sys
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from src.automations_lib.providers.ami_client import AmiError
+from src.automations_lib.providers.issabel_ami_provider import (
+    ConnectedVoipSipPeer,
+    IssabelAmiProvider,
+)
 from tools.voip_probe.config import load_settings_from_env
 from tools.voip_probe.sipp_runner import run_voip_probe
 from tools.voip_probe.storage import VoipProbeStorage
@@ -40,8 +47,10 @@ def main() -> int:
 
     try:
         if args.command == "run-once":
+            ami_snapshot = _collect_ami_snapshot(settings)
             result = run_voip_probe(settings)
             payload = result.to_dict()
+            _apply_ami_snapshot(payload=payload, snapshot=ami_snapshot)
             _apply_baseline(payload=payload, storage=storage, settings=settings)
             storage.insert_result(payload)
             storage.purge_older_than_days(settings.retention_days)
@@ -100,6 +109,162 @@ def _print_error_and_exit(exc: Exception | str, *, as_json: bool) -> int:
     else:
         print(f"ERROR: {message}", file=sys.stderr)
     return 1
+
+
+def _collect_ami_snapshot(settings) -> dict:
+    try:
+        return asyncio.run(_collect_ami_snapshot_async(settings))
+    except RuntimeError:
+        # Defensive fallback for callers that invoke main logic from a running loop.
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_collect_ami_snapshot_async(settings))
+        finally:
+            loop.close()
+
+
+async def _collect_ami_snapshot_async(settings) -> dict:
+    snapshot_at = datetime.now(timezone.utc).isoformat()
+    base_snapshot = {
+        "configured": False,
+        "ok": False,
+        "warning": False,
+        "error": None,
+        "peer_total": 0,
+        "snapshot_at_utc": snapshot_at,
+        "watched": {},
+        "peer_name_regex": str(getattr(settings, "ami_peer_name_regex", r"^\d+$") or r"^\d+$"),
+    }
+    if not _ami_is_configured(settings):
+        watched = _build_ami_watched_snapshot(settings, peers=[])
+        base_snapshot["error"] = "not_configured"
+        base_snapshot["watched"] = watched
+        return base_snapshot
+
+    provider = IssabelAmiProvider(
+        host=getattr(settings, "ami_host", None),
+        port=int(getattr(settings, "ami_port", 5038)),
+        username=getattr(settings, "ami_username", None),
+        secret=getattr(settings, "ami_secret", None),
+        timeout_seconds=int(getattr(settings, "ami_timeout_seconds", 8)),
+        use_tls=bool(getattr(settings, "ami_use_tls", False)),
+        peer_name_regex=str(getattr(settings, "ami_peer_name_regex", r"^\d+$") or r"^\d+$"),
+    )
+    try:
+        peers = await provider.list_connected_voips()
+    except ValueError:
+        watched = _build_ami_watched_snapshot(settings, peers=[])
+        base_snapshot["error"] = "not_configured"
+        base_snapshot["watched"] = watched
+        return base_snapshot
+    except AmiError as exc:
+        watched = _build_ami_watched_snapshot(settings, peers=[])
+        base_snapshot.update(
+            {
+                "configured": True,
+                "warning": True,
+                "error": str(exc),
+                "watched": watched,
+            }
+        )
+        return base_snapshot
+    except Exception as exc:  # pragma: no cover - defensive
+        watched = _build_ami_watched_snapshot(settings, peers=[])
+        base_snapshot.update(
+            {
+                "configured": True,
+                "warning": True,
+                "error": str(exc),
+                "watched": watched,
+            }
+        )
+        return base_snapshot
+
+    watched = _build_ami_watched_snapshot(settings, peers=peers)
+    base_snapshot.update(
+        {
+            "configured": True,
+            "ok": True,
+            "warning": False,
+            "error": None,
+            "peer_total": len(peers),
+            "watched": watched,
+        }
+    )
+    return base_snapshot
+
+
+def _apply_ami_snapshot(*, payload: dict, snapshot: dict) -> None:
+    prechecks = payload.get("prechecks")
+    if not isinstance(prechecks, dict):
+        prechecks = {}
+    prechecks["ami"] = snapshot
+    payload["prechecks"] = prechecks
+
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
+    ami_warning = bool(snapshot.get("warning"))
+    summary["ami_warning"] = ami_warning
+    summary["ami_warning_reason"] = str(snapshot.get("error") or "") if ami_warning else None
+    payload["summary"] = summary
+
+
+def _ami_is_configured(settings) -> bool:
+    return bool(
+        getattr(settings, "ami_host", None)
+        and getattr(settings, "ami_username", None)
+        and getattr(settings, "ami_secret", None)
+    )
+
+
+def _build_ami_watched_snapshot(
+    settings,
+    *,
+    peers: list[ConnectedVoipSipPeer],
+) -> dict[str, dict]:
+    peer_map = {peer.name: peer for peer in peers}
+    watched: dict[str, dict] = {}
+    self_number = str(getattr(settings, "sip_login", "") or getattr(settings, "sip_username", "") or "").strip()
+    target_number = str(getattr(settings, "target_number", "") or "").strip()
+    external_number = str(getattr(settings, "external_reference_number", "") or "").strip()
+    if self_number:
+        watched["self"] = _peer_watch_entry(number=self_number, peer=peer_map.get(self_number))
+    if target_number:
+        watched["target"] = _peer_watch_entry(
+            number=target_number,
+            peer=peer_map.get(target_number),
+        )
+    if external_number and _should_include_external_ami_watch(
+        external_number,
+        str(getattr(settings, "ami_peer_name_regex", r"^\d+$") or r"^\d+$"),
+    ):
+        watched["external"] = _peer_watch_entry(
+            number=external_number,
+            peer=peer_map.get(external_number),
+        )
+    return watched
+
+
+def _peer_watch_entry(*, number: str, peer: ConnectedVoipSipPeer | None) -> dict:
+    if peer is None:
+        return {"number": number, "connected": False}
+    return {
+        "number": number,
+        "connected": True,
+        "ip": peer.ip,
+        "port": peer.port,
+        "status": peer.status,
+    }
+
+
+def _should_include_external_ami_watch(number: str, peer_name_regex: str) -> bool:
+    if not number.isdigit():
+        return False
+    try:
+        return bool(re.compile(peer_name_regex).match(number))
+    except re.error:
+        return number.isdigit()
 
 
 def _apply_baseline(*, payload: dict, storage: VoipProbeStorage, settings) -> None:
