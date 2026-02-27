@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.automations_lib.providers.issabel_ami_provider import ConnectedVoipSipPeer
+from src.automations_lib.providers.issabel_ami_provider import (
+    ConnectedVoipSipPeer,
+    VoipPeerOverview,
+)
 from src.config import Settings
 from src.handlers import BotHandlers
 from src.state_store import BotStateStore
@@ -51,21 +55,35 @@ class FakeIssabelProvider:
     def __init__(
         self,
         peers: list[ConnectedVoipSipPeer] | None = None,
+        overview: VoipPeerOverview | None = None,
         error: Exception | None = None,
         transport: str = "http_rawman",
         endpoint: str = "coalapabx.ddns.net:8088/asterisk/rawman",
     ) -> None:
         self._peers = peers or []
+        self._overview = overview
         self._error = error
         self._transport = transport
         self._endpoint = endpoint
         self.called = False
 
-    async def list_connected_voips(self) -> list[ConnectedVoipSipPeer]:
+    async def list_voip_overview(self) -> VoipPeerOverview:
         self.called = True
         if self._error is not None:
             raise self._error
-        return list(self._peers)
+        if self._overview is not None:
+            return self._overview
+        online_count = len(self._peers)
+        return VoipPeerOverview(
+            total_count=online_count,
+            online_count=online_count,
+            offline_count=0,
+            connected_peers=list(self._peers),
+        )
+
+    async def list_connected_voips(self) -> list[ConnectedVoipSipPeer]:
+        overview = await self.list_voip_overview()
+        return list(overview.connected_peers)
 
     def transport_name(self) -> str:
         return self._transport
@@ -112,7 +130,14 @@ async def test_voips_handler_lists_connected_peers_and_audits(tmp_path) -> None:
         ConnectedVoipSipPeer(name="1001", ip="10.0.0.1", port=5060, status="OK (12 ms)"),
         ConnectedVoipSipPeer(name="1002", ip="10.0.0.2", port=None, status=None),
     ]
-    provider = FakeIssabelProvider(peers=peers)
+    provider = FakeIssabelProvider(
+        overview=VoipPeerOverview(
+            total_count=3,
+            online_count=2,
+            offline_count=1,
+            connected_peers=peers,
+        )
+    )
     store = BotStateStore(str(tmp_path / "state.db"))
     handlers = BotHandlers(
         settings=build_settings(allowed_chat_id=123),
@@ -128,7 +153,11 @@ async def test_voips_handler_lists_connected_peers_and_audits(tmp_path) -> None:
     assert provider.called is True
     combined = "\n".join(item["text"] for item in update.message.replies)
     assert "VoIPs conectados (SIP)" in combined
-    assert "Total: <b>2</b>" in combined
+    assert "Total ramais: <b>3</b>" in combined
+    assert "Online: <b>2</b>" in combined
+    assert "Offline: <b>1</b>" in combined
+    assert "Diferença (24h): <b>N/A</b>" in combined
+    assert "Ramais online:" in combined
     assert "- 1001: 10.0.0.1:5060 | OK (12 ms)" in combined
     assert "- 1002: 10.0.0.2" in combined
 
@@ -142,6 +171,43 @@ async def test_voips_handler_lists_connected_peers_and_audits(tmp_path) -> None:
     payload = ami_end.get("payload") or {}
     assert payload.get("transport") == "http_rawman"
     assert payload.get("peer_count") == 2
+    assert payload.get("online_count") == 2
+    assert payload.get("offline_count") == 1
+    assert payload.get("total_count") == 3
+
+
+@pytest.mark.asyncio
+async def test_voips_handler_shows_diff_vs_24h_online(tmp_path) -> None:
+    peers = [
+        ConnectedVoipSipPeer(name="1001", ip="10.0.0.1", port=5060, status="OK (10 ms)"),
+    ]
+    provider = FakeIssabelProvider(
+        overview=VoipPeerOverview(
+            total_count=2,
+            online_count=1,
+            offline_count=1,
+            connected_peers=peers,
+        )
+    )
+    store = BotStateStore(str(tmp_path / "state.db"))
+    store.record_ami_peer_snapshot(
+        captured_at_utc=datetime.now(timezone.utc) - timedelta(hours=24, minutes=1),
+        online_count=2,
+        offline_count=0,
+    )
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=DummyOrchestrator(),
+        state_store=store,
+        voip_provider=DummyVoipProvider(),  # type: ignore[arg-type]
+        issabel_provider=provider,  # type: ignore[arg-type]
+    )
+    update = FakeUpdate(text="/voips", chat_id=123)
+
+    await handlers.voips_handler(update, context=None)  # type: ignore[arg-type]
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "Diferença (24h): <b>-1</b>" in combined
 
 
 @pytest.mark.asyncio

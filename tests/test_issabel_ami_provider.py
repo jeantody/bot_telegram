@@ -6,6 +6,7 @@ from src.automations_lib.providers import issabel_ami_provider as provider_mod
 from src.automations_lib.providers.issabel_ami_provider import (
     IssabelAmiProvider,
     filter_connected_sip_peers,
+    filter_sip_peers,
 )
 
 
@@ -57,6 +58,35 @@ def test_filter_connected_sip_peers_keeps_only_registered_numeric_peers() -> Non
     assert peers[0].status == "OK (12 ms)"
 
 
+def test_filter_sip_peers_marks_online_and_offline() -> None:
+    entries = [
+        {
+            "Event": "PeerEntry",
+            "ObjectName": "1001",
+            "Dynamic": "yes",
+            "IPaddress": "10.0.0.1",
+            "IPport": "5060",
+            "Status": "OK (12 ms)",
+        },
+        {
+            "Event": "PeerEntry",
+            "ObjectName": "1002",
+            "Dynamic": "yes",
+            "IPaddress": "0.0.0.0",
+            "IPport": "5060",
+            "Status": "Unmonitored",
+        },
+    ]
+
+    peers = filter_sip_peers(entries, peer_name_regex=r"^\d+$")
+
+    assert len(peers) == 2
+    assert peers[0].name == "1001"
+    assert peers[0].online is True
+    assert peers[1].name == "1002"
+    assert peers[1].online is False
+
+
 @pytest.mark.asyncio
 async def test_provider_uses_http_rawman_when_url_present(monkeypatch) -> None:
     called = {"rawman": False}
@@ -91,6 +121,10 @@ async def test_provider_uses_http_rawman_when_url_present(monkeypatch) -> None:
     assert called["rawman"] is True
     assert len(peers) == 1
     assert peers[0].name == "1101"
+    overview = await provider.list_voip_overview()
+    assert overview.total_count == 1
+    assert overview.online_count == 1
+    assert overview.offline_count == 0
 
 
 @pytest.mark.asyncio
@@ -125,4 +159,42 @@ async def test_provider_uses_tcp_when_rawman_url_missing(monkeypatch) -> None:
     assert called["tcp"] is True
     assert len(peers) == 1
     assert peers[0].name == "2201"
+
+
+@pytest.mark.asyncio
+async def test_provider_overview_counts_offline_peers(monkeypatch) -> None:
+    async def fake_rawman_run(self):
+        return [
+            {
+                "Event": "PeerEntry",
+                "ObjectName": "1101",
+                "Dynamic": "yes",
+                "IPaddress": "10.10.10.10",
+                "IPport": "5060",
+                "Status": "OK (5 ms)",
+            },
+            {
+                "Event": "PeerEntry",
+                "ObjectName": "1102",
+                "Dynamic": "yes",
+                "IPaddress": "0.0.0.0",
+                "IPport": "5060",
+                "Status": "Unmonitored",
+            },
+        ]
+
+    monkeypatch.setattr(provider_mod.AmiHttpRawmanClient, "run_sip_peers", fake_rawman_run)
+
+    provider = IssabelAmiProvider(
+        host="127.0.0.1",
+        rawman_url="http://pbx/asterisk/rawman",
+        port=5038,
+        username="u",
+        secret="s",
+    )
+    overview = await provider.list_voip_overview()
+    assert overview.total_count == 2
+    assert overview.online_count == 1
+    assert overview.offline_count == 1
+    assert [peer.name for peer in overview.connected_peers] == ["1101"]
 

@@ -452,15 +452,39 @@ class BotHandlers:
             payload={"transport": ami_transport, "endpoint": ami_endpoint},
         )
         try:
-            peers = await self._issabel_provider.list_connected_voips()
+            overview = await self._issabel_provider.list_voip_overview()
+            peers = overview.connected_peers
+            now_utc = datetime.now(timezone.utc)
+            diff_online_24h: int | None = None
+            if self._state_store is not None:
+                baseline = self._state_store.get_ami_peer_snapshot_at_or_before(
+                    target_utc=now_utc - timedelta(hours=24)
+                )
+                if baseline is not None:
+                    diff_online_24h = (
+                        int(overview.online_count) - int(baseline["online_count"])
+                    )
+                self._state_store.record_ami_peer_snapshot(
+                    captured_at_utc=now_utc,
+                    online_count=overview.online_count,
+                    offline_count=overview.offline_count,
+                )
             lines = [
                 "<b>VoIPs conectados (SIP)</b>",
                 f"Trace: <code>{html.escape(trace_id)}</code>",
-                f"Total: <b>{len(peers)}</b>",
+                f"Total ramais: <b>{overview.total_count}</b>",
+                f"Online: <b>{overview.online_count}</b>",
+                f"Offline: <b>{overview.offline_count}</b>",
+                (
+                    f"Diferença (24h): <b>{diff_online_24h}</b>"
+                    if diff_online_24h is not None
+                    else "Diferença (24h): <b>N/A</b>"
+                ),
             ]
             if not peers:
-                lines.append("Sem ramais conectados.")
+                lines.append("Sem ramais online.")
             else:
+                lines.append("Ramais online:")
                 for peer in peers:
                     addr = f"{peer.ip}:{peer.port}" if peer.port is not None else peer.ip
                     line = f"- {html.escape(peer.name)}: {html.escape(addr)}"
@@ -475,7 +499,14 @@ class BotHandlers:
                 context=automation_context,
                 status="ok",
                 severity="info",
-                payload={"transport": ami_transport, "peer_count": len(peers)},
+                payload={
+                    "transport": ami_transport,
+                    "peer_count": len(peers),
+                    "online_count": overview.online_count,
+                    "offline_count": overview.offline_count,
+                    "total_count": overview.total_count,
+                    "diff_online_24h": diff_online_24h,
+                },
             )
             self._record_audit(
                 trace_id=trace_id,
@@ -484,7 +515,13 @@ class BotHandlers:
                 context=automation_context,
                 status="ok",
                 severity="info",
-                payload={"count": len(peers)},
+                payload={
+                    "count": len(peers),
+                    "online_count": overview.online_count,
+                    "offline_count": overview.offline_count,
+                    "total_count": overview.total_count,
+                    "diff_online_24h": diff_online_24h,
+                },
             )
         except ValueError:
             await message.reply_text(
@@ -1533,6 +1570,10 @@ class BotHandlers:
         transport = str(payload.get("transport") or "").strip()
         phase = str(payload.get("phase") or "").strip()
         peer_count = payload.get("peer_count")
+        online_count = payload.get("online_count")
+        offline_count = payload.get("offline_count")
+        total_count = payload.get("total_count")
+        diff_online_24h = payload.get("diff_online_24h")
         rc = payload.get("rc")
         stage = str(payload.get("stage") or "").strip()
         sip_code = payload.get("sip_final_code")
@@ -1545,6 +1586,14 @@ class BotHandlers:
             ami_parts.append(f"peers={peer_count}")
         if ami_parts:
             suffix_parts.append(f"ami={html.escape(' '.join(ami_parts))}")
+        if online_count is not None:
+            suffix_parts.append(f"online={html.escape(str(online_count))}")
+        if offline_count is not None:
+            suffix_parts.append(f"offline={html.escape(str(offline_count))}")
+        if total_count is not None:
+            suffix_parts.append(f"total={html.escape(str(total_count))}")
+        if diff_online_24h is not None:
+            suffix_parts.append(f"diff24h={html.escape(str(diff_online_24h))}")
         if rc is not None:
             suffix_parts.append(f"rc={html.escape(str(rc))}")
         if stage:

@@ -190,3 +190,27 @@ def test_record_audit_event_redacts_sensitive_payload(tmp_path: Path) -> None:
     assert payload["nested"]["secret"] == "<redacted>"
     assert "ABCDEF" not in payload["url"]
     assert "api.telegram.org/bot<redacted>" in payload["url"]
+
+
+def test_ami_peer_snapshot_records_and_reads_24h_baseline(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    store = BotStateStore(str(db_path))
+    now = datetime(2026, 2, 27, 12, 0, 0, tzinfo=timezone.utc)
+    older = now - timedelta(hours=24, minutes=5)
+    newer = now - timedelta(hours=23, minutes=50)
+    store.record_ami_peer_snapshot(
+        captured_at_utc=older,
+        online_count=10,
+        offline_count=2,
+    )
+    store.record_ami_peer_snapshot(
+        captured_at_utc=newer,
+        online_count=9,
+        offline_count=3,
+    )
+
+    snapshot = store.get_ami_peer_snapshot_at_or_before(target_utc=now - timedelta(hours=24))
+    assert snapshot is not None
+    assert snapshot["online_count"] == 10
+    assert snapshot["offline_count"] == 2
+    assert snapshot["total_count"] == 12

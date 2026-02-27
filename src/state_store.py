@@ -115,6 +115,23 @@ class BotStateStore:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ami_peer_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    online_count INTEGER NOT NULL,
+                    offline_count INTEGER NOT NULL,
+                    total_count INTEGER NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ami_peer_snapshots_created_at
+                ON ami_peer_snapshots(created_at)
+                """
+            )
             self._connection.commit()
 
     def close(self) -> None:
@@ -470,6 +487,56 @@ class BotStateStore:
                 }
             )
         return events
+
+    def record_ami_peer_snapshot(
+        self,
+        *,
+        captured_at_utc: datetime,
+        online_count: int,
+        offline_count: int,
+    ) -> None:
+        created_at = captured_at_utc.astimezone(timezone.utc).isoformat()
+        online = max(0, int(online_count))
+        offline = max(0, int(offline_count))
+        total = online + offline
+        with self._lock:
+            cursor = self._connection.cursor()
+            cursor.execute(
+                """
+                INSERT INTO ami_peer_snapshots (
+                    created_at, online_count, offline_count, total_count
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (created_at, online, offline, total),
+            )
+            self._connection.commit()
+
+    def get_ami_peer_snapshot_at_or_before(
+        self,
+        *,
+        target_utc: datetime,
+    ) -> dict | None:
+        target_iso = target_utc.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            cursor = self._connection.cursor()
+            row = cursor.execute(
+                """
+                SELECT created_at, online_count, offline_count, total_count
+                FROM ami_peer_snapshots
+                WHERE created_at <= ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (target_iso,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "created_at": row["created_at"],
+            "online_count": int(row["online_count"]),
+            "offline_count": int(row["offline_count"]),
+            "total_count": int(row["total_count"]),
+        }
 
 def _resolve_timezone(timezone_name: str):
     try:
