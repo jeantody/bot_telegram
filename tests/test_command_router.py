@@ -91,6 +91,16 @@ class FakeVoipProvider:
             run_id="run-1",
             destinations=[
                 {
+                    "key": "self",
+                    "number": "1101",
+                    "no_issues": True,
+                    "setup_latency_ms": 600,
+                    "sip_final_code": 200,
+                    "category": None,
+                    "options": {"ok": True, "sip_final_code": 200, "sip_status_text": "200 OK"},
+                    "invite": {"ok": True, "sip_final_code": 200, "sip_status_text": "200 OK"},
+                },
+                {
                     "key": "target",
                     "number": "1102",
                     "no_issues": True,
@@ -112,8 +122,8 @@ class FakeVoipProvider:
                 },
             ],
             summary={
-                "total_destinations": 2,
-                "successful_destinations": 2,
+                "total_destinations": 3,
+                "successful_destinations": 3,
                 "failed_destinations": 0,
             },
         )
@@ -158,6 +168,11 @@ class FakeVoipProviderLongError(FakeVoipProvider):
                 failure_stage="invite",
             )
         ]
+
+
+class FakeVoipProviderRunError(FakeVoipProvider):
+    async def run_once(self) -> VoipProbeResult:
+        raise RuntimeError("voip probe terminated by SIGTERM (rc=-15) [run-once]")
 
 
 def build_settings(allowed_chat_id: int | None) -> Settings:
@@ -329,7 +344,6 @@ async def test_voip_command_runs_probe_and_replies() -> None:
     combined = "\n".join(item["text"] for item in update.message.replies)
     assert "VoIP Probe" in combined
     assert "Destino" in combined
-    assert "AMI:" not in combined
     assert "Matriz" in combined
     assert "Resumo" in combined
 
@@ -435,3 +449,156 @@ async def test_logs_command_error_filter_returns_only_error_events(tmp_path) -> 
     assert "ultimos 1 erros" in combined
     assert "/host" in combined
     assert "/status" not in combined
+
+
+@pytest.mark.asyncio
+async def test_logs_command_ami_filter_includes_payload_details(tmp_path) -> None:
+    orchestrator = FakeOrchestrator({})
+    store = BotStateStore(str(tmp_path / "state.db"))
+    store.record_audit_event(
+        trace_id="a1",
+        event_type="ami_query_start",
+        command="/voips",
+        chat_id=123,
+        user_id=1,
+        username="tester",
+        status="start",
+        severity="info",
+        payload={"transport": "http_rawman", "endpoint": "pbx:8088/asterisk/rawman"},
+    )
+    store.record_audit_event(
+        trace_id="a1",
+        event_type="ami_query_end",
+        command="/voips",
+        chat_id=123,
+        user_id=1,
+        username="tester",
+        status="error",
+        severity="alerta",
+        payload={
+            "transport": "http_rawman",
+            "phase": "login",
+            "error": "permission denied",
+            "peer_count": 0,
+        },
+    )
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        state_store=store,
+    )
+    update = FakeUpdate(text="/logs ami 10", chat_id=123)
+
+    await handlers.logs_handler(update, FakeContext(args=["ami", "10"]))
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "AMI" in combined
+    assert "ami_query_end" in combined
+    assert "detalhe=permission denied" in combined
+    assert "ami=http_rawman login peers=0" in combined
+
+
+@pytest.mark.asyncio
+async def test_all_command_records_voip_error_audit(tmp_path) -> None:
+    orchestrator = FakeOrchestrator(
+        {
+            "status": [result("s1")],
+            "host": [result("h1")],
+        }
+    )
+    store = BotStateStore(str(tmp_path / "state.db"))
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        state_store=store,
+        voip_provider=FakeVoipProviderRunError(),
+    )
+    update = FakeUpdate(text="/all", chat_id=123)
+
+    await handlers.all_handler(update, FakeContext())
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "Falha no /voip" in combined
+    events = store.list_audit_events(limit=50)
+    voip_error = next(
+        item for item in events if str(item.get("event_type")) == "all_voip_error"
+    )
+    payload = voip_error.get("payload") or {}
+    assert payload.get("stage") == "voip_in_all"
+    assert payload.get("rc") == -15
+
+
+@pytest.mark.asyncio
+async def test_logs_command_voip_filter_includes_voip_details(tmp_path) -> None:
+    orchestrator = FakeOrchestrator({})
+    store = BotStateStore(str(tmp_path / "state.db"))
+    store.record_audit_event(
+        trace_id="v1",
+        event_type="all_voip_error",
+        command="/all",
+        chat_id=123,
+        user_id=1,
+        username="tester",
+        status="error",
+        severity="alerta",
+        payload={
+            "error": "voip probe terminated by SIGTERM (rc=-15)",
+            "rc": -15,
+            "stage": "voip_in_all",
+            "sip_final_code": 200,
+        },
+    )
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        state_store=store,
+    )
+    update = FakeUpdate(text="/logs voip 10", chat_id=123)
+
+    await handlers.logs_handler(update, FakeContext(args=["voip", "10"]))
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "VoIP" in combined
+    assert "all_voip_error" in combined
+    assert "rc=-15" in combined
+    assert "stage=voip_in_all" in combined
+
+
+@pytest.mark.asyncio
+async def test_logs_command_voip_error_filter_keeps_only_errors(tmp_path) -> None:
+    orchestrator = FakeOrchestrator({})
+    store = BotStateStore(str(tmp_path / "state.db"))
+    store.record_audit_event(
+        trace_id="v2",
+        event_type="all_voip_ok",
+        command="/all",
+        chat_id=123,
+        user_id=1,
+        username="tester",
+        status="ok",
+        severity="info",
+        payload={"stage": "voip_in_all", "sip_final_code": 200},
+    )
+    store.record_audit_event(
+        trace_id="v3",
+        event_type="voip_probe_tick",
+        command="/voip",
+        chat_id=123,
+        user_id=1,
+        username="tester",
+        status="error",
+        severity="critico",
+        payload={"error": "timeout", "rc": -15},
+    )
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        state_store=store,
+    )
+    update = FakeUpdate(text="/logs voip erro 10", chat_id=123)
+
+    await handlers.logs_handler(update, FakeContext(args=["voip", "erro", "10"]))
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "voip_probe_tick" in combined
+    assert "all_voip_ok" not in combined

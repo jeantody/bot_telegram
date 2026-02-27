@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import signal
 import sys
 from typing import Any
 
@@ -134,11 +135,21 @@ class VoipProbeProvider:
             raise RuntimeError(
                 f"saida JSON invalida do VoIP probe: {stdout_text[:250]}"
             ) from exc
-        if process.returncode != 0 and not isinstance(payload, dict):
-            raise RuntimeError(stderr_text or f"voip probe rc={process.returncode}")
-        if process.returncode != 0 and isinstance(payload, dict):
-            error = str(payload.get("error") or stderr_text or f"voip probe rc={process.returncode}")
-            raise RuntimeError(error)
+        if process.returncode != 0:
+            payload_error = (
+                str(payload.get("error") or "").strip()
+                if isinstance(payload, dict)
+                else ""
+            )
+            raise RuntimeError(
+                _format_nonzero_exit_error(
+                    command_name=args[0] if args else "unknown",
+                    return_code=int(process.returncode),
+                    stderr_text=stderr_text,
+                    stdout_text=stdout_text,
+                    payload_error=payload_error,
+                )
+            )
         if not isinstance(payload, dict):
             raise RuntimeError("resposta invalida do VoIP probe.")
         return payload
@@ -196,4 +207,55 @@ def _to_optional_int(value) -> int | None:
     try:
         return int(value)
     except (TypeError, ValueError):
+        return None
+
+
+def _format_nonzero_exit_error(
+    *,
+    command_name: str,
+    return_code: int,
+    stderr_text: str,
+    stdout_text: str,
+    payload_error: str,
+) -> str:
+    detail = _pick_error_detail(
+        payload_error=payload_error,
+        stderr_text=stderr_text,
+        stdout_text=stdout_text,
+    )
+    if return_code < 0:
+        signal_name = _signal_name(return_code)
+        base = (
+            f"voip probe terminated by {signal_name} (rc={return_code})"
+            if signal_name
+            else f"voip probe terminated (rc={return_code})"
+        )
+    else:
+        base = f"voip probe failed (rc={return_code})"
+    message = f"{base} [{command_name}]"
+    if detail:
+        message += f": {detail}"
+    return message
+
+
+def _pick_error_detail(
+    *,
+    payload_error: str,
+    stderr_text: str,
+    stdout_text: str,
+) -> str:
+    for candidate in (payload_error, stderr_text, stdout_text):
+        value = candidate.strip()
+        if value:
+            return value[-200:]
+    return ""
+
+
+def _signal_name(return_code: int) -> str | None:
+    if return_code >= 0:
+        return None
+    signum = -return_code
+    try:
+        return signal.Signals(signum).name
+    except Exception:
         return None

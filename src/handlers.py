@@ -118,6 +118,7 @@ class BotHandlers:
         )
         self._issabel_provider = issabel_provider or IssabelAmiProvider(
             host=settings.issabel_ami_host,
+            rawman_url=settings.issabel_ami_rawman_url,
             port=settings.issabel_ami_port,
             username=settings.issabel_ami_username,
             secret=settings.issabel_ami_secret,
@@ -439,6 +440,17 @@ class BotHandlers:
             severity="info",
             payload=None,
         )
+        ami_transport = self._issabel_provider.transport_name()
+        ami_endpoint = self._issabel_provider.endpoint_label()
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="ami_query_start",
+            command="/voips",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload={"transport": ami_transport, "endpoint": ami_endpoint},
+        )
         try:
             peers = await self._issabel_provider.list_connected_voips()
             lines = [
@@ -458,6 +470,15 @@ class BotHandlers:
             await self._reply_chunks(message, "\n".join(lines))
             self._record_audit(
                 trace_id=trace_id,
+                event_type="ami_query_end",
+                command="/voips",
+                context=automation_context,
+                status="ok",
+                severity="info",
+                payload={"transport": ami_transport, "peer_count": len(peers)},
+            )
+            self._record_audit(
+                trace_id=trace_id,
                 event_type="command_end",
                 command="/voips",
                 context=automation_context,
@@ -468,7 +489,20 @@ class BotHandlers:
         except ValueError:
             await message.reply_text(
                 "ISSABEL AMI nao configurado. Configure "
-                "ISSABEL_AMI_HOST/ISSABEL_AMI_USERNAME/ISSABEL_AMI_SECRET."
+                "ISSABEL_AMI_RAWMAN_URL ou ISSABEL_AMI_HOST + usuario/secret."
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="ami_query_end",
+                command="/voips",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "transport": ami_transport,
+                    "error": "not_configured",
+                    "phase": "connect",
+                },
             )
             self._record_audit(
                 trace_id=trace_id,
@@ -483,6 +517,19 @@ class BotHandlers:
             await message.reply_text(f"Falha no /voips: {exc}")
             self._record_audit(
                 trace_id=trace_id,
+                event_type="ami_query_end",
+                command="/voips",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "transport": ami_transport,
+                    "error": str(exc),
+                    "phase": self._detect_ami_phase(str(exc)),
+                },
+            )
+            self._record_audit(
+                trace_id=trace_id,
                 event_type="command_end",
                 command="/voips",
                 context=automation_context,
@@ -492,6 +539,19 @@ class BotHandlers:
             )
         except Exception as exc:
             await message.reply_text(f"Falha no /voips: {exc}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="ami_query_end",
+                command="/voips",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "transport": ami_transport,
+                    "error": str(exc),
+                    "phase": self._detect_ami_phase(str(exc)),
+                },
+            )
             self._record_audit(
                 trace_id=trace_id,
                 event_type="command_end",
@@ -848,6 +908,8 @@ class BotHandlers:
         args = getattr(context, "args", []) or []
         limit = 20
         only_error = False
+        only_ami = False
+        only_voip = False
         if args:
             first = str(args[0]).strip().lower()
             if first in {"erro", "error"}:
@@ -856,16 +918,82 @@ class BotHandlers:
                     try:
                         limit = max(1, min(100, int(args[1])))
                     except ValueError:
-                        await message.reply_text("Uso: /logs [quantidade] ou /logs erro [quantidade]")
+                        await message.reply_text(
+                            "Uso: /logs [quantidade], /logs erro [quantidade], "
+                            "/logs ami [quantidade] ou /logs voip [quantidade]"
+                        )
                         return
+            elif first == "ami":
+                only_ami = True
+                if len(args) >= 2:
+                    second = str(args[1]).strip().lower()
+                    if second in {"erro", "error"}:
+                        only_error = True
+                        if len(args) >= 3:
+                            try:
+                                limit = max(1, min(100, int(args[2])))
+                            except ValueError:
+                                await message.reply_text("Uso: /logs ami [quantidade] ou /logs ami erro [quantidade]")
+                                return
+                    else:
+                        try:
+                            limit = max(1, min(100, int(args[1])))
+                        except ValueError:
+                            await message.reply_text("Uso: /logs ami [quantidade] ou /logs ami erro [quantidade]")
+                            return
+            elif first == "voip":
+                only_voip = True
+                if len(args) >= 2:
+                    second = str(args[1]).strip().lower()
+                    if second in {"erro", "error"}:
+                        only_error = True
+                        if len(args) >= 3:
+                            try:
+                                limit = max(1, min(100, int(args[2])))
+                            except ValueError:
+                                await message.reply_text(
+                                    "Uso: /logs voip [quantidade] ou /logs voip erro [quantidade]"
+                                )
+                                return
+                    else:
+                        try:
+                            limit = max(1, min(100, int(args[1])))
+                        except ValueError:
+                            await message.reply_text(
+                                "Uso: /logs voip [quantidade] ou /logs voip erro [quantidade]"
+                            )
+                            return
             else:
                 try:
                     limit = max(1, min(100, int(args[0])))
                 except ValueError:
-                    await message.reply_text("Uso: /logs [quantidade] ou /logs erro [quantidade]")
+                    await message.reply_text(
+                        "Uso: /logs [quantidade], /logs erro [quantidade], "
+                        "/logs ami [quantidade] ou /logs voip [quantidade]"
+                    )
                     return
-        events = self._state_store.list_audit_events(limit=limit, only_error=only_error)
+        fetch_limit = 200 if (only_ami or only_voip) else limit
+        events = self._state_store.list_audit_events(limit=fetch_limit, only_error=only_error)
+        if only_ami:
+            events = [
+                item
+                for item in events
+                if str(item.get("event_type") or "").startswith("ami_")
+                or str(item.get("command") or "") == "/voips"
+            ][:limit]
+        if only_voip:
+            events = [
+                item
+                for item in events
+                if str(item.get("command") or "") in {"/voip", "/all"}
+                or str(item.get("event_type") or "")
+                in {"voip_probe_tick", "all_voip_error", "all_voip_ok"}
+            ][:limit]
         scope = "erros" if only_error else "eventos"
+        if only_ami:
+            scope = f"{scope} AMI"
+        if only_voip:
+            scope = f"{scope} VoIP"
         lines = [f"<b>Audit Log (ultimos {len(events)} {scope})</b>"]
         if not events:
             lines.append("Sem eventos.")
@@ -882,6 +1010,7 @@ class BotHandlers:
                     f"{html.escape(created_label)} | {html.escape(event_type)} | "
                     f"{html.escape(command)} | {html.escape(status)} | "
                     f"{html.escape(severity)} | trace={html.escape(trace)}"
+                    + self._format_log_payload_suffix(item.get("payload"))
                 )
         await self._reply_chunks(message, "\n".join(lines))
         self._record_audit(
@@ -891,7 +1020,13 @@ class BotHandlers:
             context=automation_context,
             status="ok",
             severity="info",
-            payload={"limit": limit, "returned": len(events), "only_error": only_error},
+            payload={
+                "limit": limit,
+                "returned": len(events),
+                "only_error": only_error,
+                "only_ami": only_ami,
+                "only_voip": only_voip,
+            },
         )
 
     async def all_handler(
@@ -913,7 +1048,11 @@ class BotHandlers:
         )
         await self._execute_trigger(message, automation_context, "status")
         await self._execute_trigger(message, automation_context, "host")
-        await self._execute_voip_in_all(message)
+        await self._execute_voip_in_all(
+            message,
+            trace_id=trace_id,
+            automation_context=automation_context,
+        )
         await self._send_reminder_overview(message, chat_id=chat_id)
         self._record_audit(
             trace_id=trace_id,
@@ -925,15 +1064,51 @@ class BotHandlers:
             payload=None,
         )
 
-    async def _execute_voip_in_all(self, message: Message) -> None:
+    async def _execute_voip_in_all(
+        self,
+        message: Message,
+        *,
+        trace_id: str,
+        automation_context: AutomationContext,
+    ) -> None:
         # /all aggregates multiple checks; VoIP errors shouldn't block reminders.
         try:
             result = await self._voip_provider.run_once()
             await self._reply_chunks(message, self._build_voip_message(result))
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="all_voip_ok",
+                command="/all",
+                context=automation_context,
+                status="ok",
+                severity="info",
+                payload={
+                    "stage": "voip_in_all",
+                    "target_number": result.target_number,
+                    "setup_latency_ms": result.setup_latency_ms,
+                    "sip_final_code": result.sip_final_code,
+                    "ok": result.ok,
+                },
+            )
         except Exception as exc:
+            error_text = str(exc)
+            rc = self._extract_rc_from_text(error_text)
             await self._reply_chunks(
                 message,
-                f"<b>VoIP Probe</b>\nFalha no /voip: {html.escape(str(exc))}",
+                f"<b>VoIP Probe</b>\nFalha no /voip: {html.escape(error_text)}",
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="all_voip_error",
+                command="/all",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "stage": "voip_in_all",
+                    "error": error_text,
+                    "rc": rc,
+                },
             )
 
     async def text_handler(
@@ -1318,6 +1493,67 @@ class BotHandlers:
         if normalized == "rede_timeout":
             return "rede/timeout"
         return normalized
+
+    @staticmethod
+    def _detect_ami_phase(error_text: str | None) -> str | None:
+        text = (error_text or "").strip().lower()
+        if not text:
+            return None
+        if "login" in text:
+            return "login"
+        if "sippeers" in text:
+            return "sippeers"
+        if "logoff" in text:
+            return "logoff"
+        if "connect" in text or "connection" in text or "timeout" in text:
+            return "connect"
+        return None
+
+    @staticmethod
+    def _extract_rc_from_text(error_text: str | None) -> int | None:
+        text = (error_text or "").strip()
+        if not text:
+            return None
+        match = re.search(r"rc=(-?\d+)", text)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _format_log_payload_suffix(payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        suffix_parts: list[str] = []
+        error_text = str(payload.get("error") or "").strip()
+        if error_text:
+            suffix_parts.append(f"detalhe={html.escape(error_text[:120])}")
+        transport = str(payload.get("transport") or "").strip()
+        phase = str(payload.get("phase") or "").strip()
+        peer_count = payload.get("peer_count")
+        rc = payload.get("rc")
+        stage = str(payload.get("stage") or "").strip()
+        sip_code = payload.get("sip_final_code")
+        ami_parts: list[str] = []
+        if transport:
+            ami_parts.append(transport)
+        if phase:
+            ami_parts.append(phase)
+        if peer_count is not None:
+            ami_parts.append(f"peers={peer_count}")
+        if ami_parts:
+            suffix_parts.append(f"ami={html.escape(' '.join(ami_parts))}")
+        if rc is not None:
+            suffix_parts.append(f"rc={html.escape(str(rc))}")
+        if stage:
+            suffix_parts.append(f"stage={html.escape(stage)}")
+        if sip_code is not None:
+            suffix_parts.append(f"sip={html.escape(str(sip_code))}")
+        if not suffix_parts:
+            return ""
+        return " | " + " | ".join(suffix_parts)
 
 
 def _resolve_timezone(timezone_name: str):

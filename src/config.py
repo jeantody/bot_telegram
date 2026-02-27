@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import os
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -81,8 +82,6 @@ class Settings:
     voip_latency_alert_ms: int = 1500
     voip_results_db_path: str = "data/voip_probe.db"
     voip_alert_chat_id: int | None = None
-    rate_limit_voip_seconds: int = 120
-    rate_limit_ping_seconds: int = 20
     issabel_ami_host: str | None = None
     issabel_ami_port: int = 5038
     issabel_ami_username: str | None = None
@@ -90,23 +89,14 @@ class Settings:
     issabel_ami_timeout_seconds: int = 8
     issabel_ami_use_tls: bool = False
     issabel_ami_peer_name_regex: str = r"^\d+$"
+    issabel_ami_rawman_url: str | None = None
+    rate_limit_voip_seconds: int = 120
+    rate_limit_ping_seconds: int = 20
 
 
 def _read_int(name: str, default: int) -> int:
     raw = os.getenv(name, str(default)).strip()
     return int(raw)
-
-
-def _read_int_or_default(name: str, default: int) -> int:
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    return int(raw)
-
-
-def _read_optional_str(name: str) -> str | None:
-    raw = os.getenv(name, "").strip()
-    return raw or None
 
 
 def _read_optional_int(name: str) -> int | None:
@@ -189,6 +179,35 @@ def _read_note_tab_chat_ids(name: str) -> tuple[tuple[str, int], ...]:
     return tuple(sorted(pairs, key=lambda item: item[0]))
 
 
+def _normalize_peer_name_regex(pattern: str) -> str:
+    raw = (pattern or "").strip()
+    if not raw:
+        return r"^\d+$"
+    # Common .env mistake: using escaped backslash like ^\\d+$.
+    if raw == r"^\\d+$":
+        return r"^\d+$"
+    return raw
+
+
+def _normalize_rawman_url(raw_url: str | None) -> tuple[str | None, int | None]:
+    raw = (raw_url or "").strip()
+    if not raw:
+        return None, None
+    candidate = raw if "://" in raw else f"http://{raw}"
+    parsed = urlsplit(candidate)
+    host = parsed.hostname
+    if not host:
+        return raw, None
+    scheme = parsed.scheme or "http"
+    port = parsed.port if parsed.port is not None else 8088
+    path = parsed.path or ""
+    if path in {"", "/"}:
+        path = "/asterisk/rawman"
+    query = f"?{parsed.query}" if parsed.query else ""
+    normalized = f"{scheme}://{host}:{port}{path}{query}"
+    return normalized, port
+
+
 def _default_priority_rules() -> tuple[AlertPriorityRule, ...]:
     return (
         AlertPriorityRule(
@@ -257,6 +276,11 @@ def load_settings() -> Settings:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         raise ValueError("Missing TELEGRAM_BOT_TOKEN in environment.")
+    rawman_url, rawman_port = _normalize_rawman_url(
+        os.getenv("ISSABEL_AMI_RAWMAN_URL", "").strip() or None
+    )
+    configured_ami_port = _read_int("ISSABEL_AMI_PORT", 5038)
+    ami_port = rawman_port if rawman_url and rawman_port is not None else configured_ami_port
 
     return Settings(
         telegram_bot_token=token,
@@ -391,16 +415,16 @@ def load_settings() -> Settings:
             "VOIP_RESULTS_DB_PATH", "data/voip_probe.db"
         ).strip(),
         voip_alert_chat_id=_read_optional_int("VOIP_ALERT_CHAT_ID"),
+        issabel_ami_host=os.getenv("ISSABEL_AMI_HOST", "").strip() or None,
+        issabel_ami_port=ami_port,
+        issabel_ami_username=os.getenv("ISSABEL_AMI_USERNAME", "").strip() or None,
+        issabel_ami_secret=os.getenv("ISSABEL_AMI_SECRET", "").strip() or None,
+        issabel_ami_timeout_seconds=_read_int("ISSABEL_AMI_TIMEOUT_SECONDS", 8),
+        issabel_ami_use_tls=_read_bool("ISSABEL_AMI_USE_TLS", False),
+        issabel_ami_peer_name_regex=_normalize_peer_name_regex(
+            os.getenv("ISSABEL_AMI_PEER_NAME_REGEX", r"^\d+$")
+        ),
+        issabel_ami_rawman_url=rawman_url,
         rate_limit_voip_seconds=_read_int("RATE_LIMIT_VOIP_SECONDS", 120),
         rate_limit_ping_seconds=_read_int("RATE_LIMIT_PING_SECONDS", 20),
-        issabel_ami_host=_read_optional_str("ISSABEL_AMI_HOST"),
-        issabel_ami_port=_read_int_or_default("ISSABEL_AMI_PORT", 5038),
-        issabel_ami_username=_read_optional_str("ISSABEL_AMI_USERNAME"),
-        issabel_ami_secret=_read_optional_str("ISSABEL_AMI_SECRET"),
-        issabel_ami_timeout_seconds=_read_int_or_default("ISSABEL_AMI_TIMEOUT_SECONDS", 8),
-        issabel_ami_use_tls=_read_bool("ISSABEL_AMI_USE_TLS", False),
-        issabel_ami_peer_name_regex=(
-            (os.getenv("ISSABEL_AMI_PEER_NAME_REGEX", r"^\\d+$").strip() or r"^\\d+$")
-            .replace("\\\\", "\\")
-        ),
     )

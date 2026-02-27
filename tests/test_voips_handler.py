@@ -7,6 +7,7 @@ import pytest
 from src.automations_lib.providers.issabel_ami_provider import ConnectedVoipSipPeer
 from src.config import Settings
 from src.handlers import BotHandlers
+from src.state_store import BotStateStore
 
 
 class DummyOrchestrator:
@@ -47,9 +48,17 @@ class FakeUpdate:
 
 
 class FakeIssabelProvider:
-    def __init__(self, peers: list[ConnectedVoipSipPeer] | None = None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        peers: list[ConnectedVoipSipPeer] | None = None,
+        error: Exception | None = None,
+        transport: str = "http_rawman",
+        endpoint: str = "coalapabx.ddns.net:8088/asterisk/rawman",
+    ) -> None:
         self._peers = peers or []
         self._error = error
+        self._transport = transport
+        self._endpoint = endpoint
         self.called = False
 
     async def list_connected_voips(self) -> list[ConnectedVoipSipPeer]:
@@ -57,6 +66,12 @@ class FakeIssabelProvider:
         if self._error is not None:
             raise self._error
         return list(self._peers)
+
+    def transport_name(self) -> str:
+        return self._transport
+
+    def endpoint_label(self) -> str:
+        return self._endpoint
 
 
 def build_settings(allowed_chat_id: int | None) -> Settings:
@@ -92,15 +107,17 @@ def build_settings(allowed_chat_id: int | None) -> Settings:
 
 
 @pytest.mark.asyncio
-async def test_voips_handler_lists_connected_peers() -> None:
+async def test_voips_handler_lists_connected_peers_and_audits(tmp_path) -> None:
     peers = [
         ConnectedVoipSipPeer(name="1001", ip="10.0.0.1", port=5060, status="OK (12 ms)"),
         ConnectedVoipSipPeer(name="1002", ip="10.0.0.2", port=None, status=None),
     ]
     provider = FakeIssabelProvider(peers=peers)
+    store = BotStateStore(str(tmp_path / "state.db"))
     handlers = BotHandlers(
         settings=build_settings(allowed_chat_id=123),
         orchestrator=DummyOrchestrator(),
+        state_store=store,
         voip_provider=DummyVoipProvider(),  # type: ignore[arg-type]
         issabel_provider=provider,  # type: ignore[arg-type]
     )
@@ -114,6 +131,17 @@ async def test_voips_handler_lists_connected_peers() -> None:
     assert "Total: <b>2</b>" in combined
     assert "- 1001: 10.0.0.1:5060 | OK (12 ms)" in combined
     assert "- 1002: 10.0.0.2" in combined
+
+    events = store.list_audit_events(limit=20)
+    event_types = [str(item.get("event_type")) for item in events]
+    assert "ami_query_start" in event_types
+    assert "ami_query_end" in event_types
+    ami_end = next(
+        item for item in events if str(item.get("event_type")) == "ami_query_end"
+    )
+    payload = ami_end.get("payload") or {}
+    assert payload.get("transport") == "http_rawman"
+    assert payload.get("peer_count") == 2
 
 
 @pytest.mark.asyncio

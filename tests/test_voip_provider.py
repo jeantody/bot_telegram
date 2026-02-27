@@ -127,6 +127,41 @@ async def test_run_json_timeout_kills_process(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_json_negative_rc_reports_signal(monkeypatch) -> None:
+    provider = VoipProbeProvider(timeout_seconds=30, script_path="tools/voip_probe/main.py")
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode = -15
+
+        async def communicate(self):
+            return (
+                b'{"ok":false,"error":"voip probe rc=-15"}',
+                b"terminated by signal",
+            )
+
+    import asyncio
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        del args, kwargs
+        return FakeProcess()
+
+    async def fake_wait_for(coro, timeout):
+        del timeout
+        return await coro
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await provider._run_json_command(["run-once", "--json"])
+    text = str(excinfo.value)
+    assert "rc=-15" in text
+    assert "SIGTERM" in text or "terminated" in text
+    assert "[run-once]" in text
+
+
+@pytest.mark.asyncio
 async def test_run_once_invalid_payload_raises(monkeypatch) -> None:
     provider = VoipProbeProvider(timeout_seconds=30, script_path="tools/voip_probe/main.py")
 

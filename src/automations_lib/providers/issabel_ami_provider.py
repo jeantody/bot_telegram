@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+from urllib.parse import urlsplit
 
-from src.automations_lib.providers.ami_client import AmiClient, AmiError
+from src.automations_lib.providers.ami_client import (
+    AmiClient,
+    AmiError,
+    AmiHttpRawmanClient,
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +59,7 @@ class IssabelAmiProvider:
         self,
         *,
         host: str | None,
+        rawman_url: str | None = None,
         port: int,
         username: str | None,
         secret: str | None,
@@ -62,6 +68,7 @@ class IssabelAmiProvider:
         peer_name_regex: str = r"^\d+$",
     ) -> None:
         self._host = host
+        self._rawman_url = rawman_url
         self._port = int(port)
         self._username = username
         self._secret = secret
@@ -70,18 +77,46 @@ class IssabelAmiProvider:
         self._peer_name_regex = peer_name_regex or r"^\d+$"
 
     async def list_connected_voips(self) -> list[ConnectedVoipSipPeer]:
-        if not self._host or not self._username or not self._secret:
+        if not self._username or not self._secret:
             raise ValueError("ISSABEL AMI nao configurado")
-        client = AmiClient(
-            host=self._host,
-            port=self._port,
-            username=self._username,
-            secret=self._secret,
-            timeout_seconds=self._timeout_seconds,
-            use_tls=self._use_tls,
-        )
+        if self._rawman_url:
+            client = AmiHttpRawmanClient(
+                rawman_url=self._rawman_url,
+                username=self._username,
+                secret=self._secret,
+                timeout_seconds=self._timeout_seconds,
+            )
+        else:
+            if not self._host:
+                raise ValueError("ISSABEL AMI nao configurado")
+            client = AmiClient(
+                host=self._host,
+                port=self._port,
+                username=self._username,
+                secret=self._secret,
+                timeout_seconds=self._timeout_seconds,
+                use_tls=self._use_tls,
+            )
         entries = await client.run_sip_peers()
         return filter_connected_sip_peers(entries, peer_name_regex=self._peer_name_regex)
+
+    def transport_name(self) -> str:
+        return "http_rawman" if self._rawman_url else "tcp_ami"
+
+    def endpoint_label(self) -> str:
+        if self._rawman_url:
+            parsed = urlsplit(self._rawman_url)
+            host = parsed.hostname or parsed.netloc or ""
+            port = parsed.port
+            path = parsed.path or ""
+            if host and port:
+                return f"{host}:{port}{path}"
+            if parsed.netloc:
+                return f"{parsed.netloc}{path}"
+            return self._rawman_url
+        if self._host:
+            return f"{self._host}:{self._port}"
+        return "-"
 
 
 __all__ = [
