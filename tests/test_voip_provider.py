@@ -83,6 +83,42 @@ async def test_list_logs_parses_rows(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_call_parses_valid_json(monkeypatch) -> None:
+    provider = VoipProbeProvider(timeout_seconds=30, script_path="tools/voip_probe/main.py")
+
+    async def fake_run_json(args):
+        assert args == ["run-call", "--number", "977811366", "--json"]
+        return {
+            "ok": True,
+            "completed_call": False,
+            "no_issues": True,
+            "target_number": "977811366",
+            "hold_seconds": 5,
+            "setup_latency_ms": 620,
+            "total_duration_ms": 2300,
+            "sip_final_code": 183,
+            "error": None,
+            "started_at_utc": "2026-02-16T10:00:00+00:00",
+            "finished_at_utc": "2026-02-16T10:00:02+00:00",
+            "mode": "single_call_v1",
+            "run_id": "call-run-1",
+            "category": None,
+            "reason": None,
+            "prechecks": {"register": {"ok": True}},
+            "destinations": [{"key": "target", "number": "977811366", "no_issues": True}],
+            "summary": {"total_destinations": 1},
+            "failure_destination_number": None,
+            "failure_stage": None,
+        }
+
+    monkeypatch.setattr(provider, "_run_json_command", fake_run_json)
+    result = await provider.run_call("977811366")
+    assert result.ok is True
+    assert result.target_number == "977811366"
+    assert result.mode == "single_call_v1"
+
+
+@pytest.mark.asyncio
 async def test_run_json_timeout_kills_process(monkeypatch) -> None:
     provider = VoipProbeProvider(timeout_seconds=1, script_path="tools/voip_probe/main.py")
 

@@ -292,6 +292,144 @@ def run_voip_probe(settings: VoipProbeSettings) -> VoipProbeRunResult:
     )
 
 
+def run_single_call_probe(
+    settings: VoipProbeSettings,
+    *,
+    destination_number: str,
+) -> VoipProbeRunResult:
+    target = str(destination_number or "").strip()
+    if not target:
+        raise ValueError("destination_number vazio")
+    started_at = datetime.now(timezone.utc)
+    run_id = uuid.uuid4().hex[:12]
+
+    register_stage = _run_stage(
+        settings=settings,
+        stage_name="register",
+        scenario_template="register_check.xml",
+        target_number=settings.sip_login,
+        stage_destination=settings.sip_login,
+        replacements={},
+        hold_seconds=0,
+    )
+
+    if not register_stage.ok:
+        target_result = DestinationProbeResult(
+            key="target",
+            number=target,
+            options=ProbeStageResult(
+                stage="options",
+                ok=False,
+                sip_final_code=register_stage.sip_final_code,
+                sip_status_text=register_stage.sip_status_text,
+                setup_latency_ms=None,
+                total_duration_ms=0,
+                error=register_stage.error,
+                category=register_stage.category,
+                reason=register_stage.reason,
+            ),
+            invite=ProbeStageResult(
+                stage="invite",
+                ok=False,
+                sip_final_code=register_stage.sip_final_code,
+                sip_status_text=register_stage.sip_status_text,
+                setup_latency_ms=None,
+                total_duration_ms=0,
+                error="invite nao executado por falha no REGISTER",
+                category=register_stage.category,
+                reason=register_stage.reason,
+            ),
+            completed_call=False,
+            no_issues=False,
+            setup_latency_ms=None,
+            sip_final_code=register_stage.sip_final_code,
+            error=register_stage.error,
+            category=register_stage.category,
+            reason=register_stage.reason,
+        )
+    else:
+        options_stage = _run_stage(
+            settings=settings,
+            stage_name="options",
+            scenario_template="options_check.xml",
+            target_number=target,
+            stage_destination=target,
+            replacements={"{{TARGET_NUMBER}}": target},
+            hold_seconds=0,
+        )
+        invite_stage = _run_stage(
+            settings=settings,
+            stage_name="invite",
+            scenario_template="call_out_2s.xml",
+            target_number=target,
+            stage_destination=target,
+            replacements={"{{TARGET_NUMBER}}": target},
+            hold_seconds=settings.hold_seconds,
+        )
+        completed_call = invite_stage.ok and invite_stage.sip_final_code == 200
+        no_issues = invite_stage.ok and invite_stage.error is None
+        if invite_stage.ok and invite_stage.error is None:
+            category = invite_stage.category
+            reason = invite_stage.reason
+            error = invite_stage.error
+        else:
+            category = invite_stage.category or options_stage.category
+            reason = invite_stage.reason or options_stage.reason
+            error = invite_stage.error or options_stage.error
+        target_result = DestinationProbeResult(
+            key="target",
+            number=target,
+            options=options_stage,
+            invite=invite_stage,
+            completed_call=completed_call,
+            no_issues=no_issues,
+            setup_latency_ms=invite_stage.setup_latency_ms,
+            sip_final_code=invite_stage.sip_final_code,
+            error=error,
+            category=category,
+            reason=reason,
+        )
+
+    destinations = [target_result]
+    primary_failure = _pick_primary_failure(destinations)
+    if not register_stage.ok:
+        failure_destination_number = settings.sip_login
+        failure_stage = "register"
+    else:
+        failure_destination_number = (
+            primary_failure.number if primary_failure is not None else None
+        )
+        failure_stage = (
+            _pick_failure_stage(primary_failure) if primary_failure is not None else None
+        )
+    summary = _build_summary(destinations)
+    prechecks = {"register": register_stage.to_dict()}
+    finished_at = datetime.now(timezone.utc)
+    total_duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
+    return VoipProbeRunResult(
+        ok=target_result.no_issues,
+        completed_call=target_result.completed_call,
+        no_issues=target_result.no_issues,
+        target_number=target,
+        hold_seconds=settings.hold_seconds,
+        setup_latency_ms=target_result.setup_latency_ms,
+        total_duration_ms=total_duration_ms,
+        sip_final_code=target_result.sip_final_code,
+        error=primary_failure.reason if primary_failure is not None else None,
+        started_at_utc=started_at.isoformat(),
+        finished_at_utc=finished_at.isoformat(),
+        mode="single_call_v1",
+        run_id=run_id,
+        category=primary_failure.category if primary_failure is not None else None,
+        reason=primary_failure.reason if primary_failure is not None else None,
+        prechecks=prechecks,
+        destinations=[target_result.to_dict()],
+        summary=summary,
+        failure_destination_number=failure_destination_number,
+        failure_stage=failure_stage,
+    )
+
+
 def _run_stage(
     *,
     settings: VoipProbeSettings,

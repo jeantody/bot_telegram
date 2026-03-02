@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import html
@@ -73,6 +73,7 @@ class BotHandlers:
     BLOCKED_MESSAGE = "Acesso nao autorizado para este chat."
     TAB_ALIAS = {"estudo": "estudos"}
     TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+    CALL_TARGET_RE = re.compile(r"^[0-9+*#]{2,20}$")
 
     def __init__(
         self,
@@ -137,7 +138,7 @@ class BotHandlers:
             return
         await update.message.reply_text(
             "Bot online. Use /status, /host, /health, /whois, /cep, /ping, /ssl, "
-            "/voips, /voip, /voip_logs, /note, /lembrete, /logs ou /all."
+            "/voips, /voip, /call, /voip_logs, /note, /lembrete, /logs ou /all."
         )
 
     async def help_handler(
@@ -148,7 +149,7 @@ class BotHandlers:
             return
         await update.message.reply_text(
             "Comandos: /start, /help, status, /status, /host, /health, /whois, "
-            "/cep, /ping, /ssl, /voips, /voip, /voip_logs, /note, /lembrete, /logs, /all"
+            "/cep, /ping, /ssl, /voips, /voip, /call, /voip_logs, /note, /lembrete, /logs, /all"
         )
 
     async def status_handler(
@@ -452,45 +453,13 @@ class BotHandlers:
             payload={"transport": ami_transport, "endpoint": ami_endpoint},
         )
         try:
-            overview = await self._issabel_provider.list_voip_overview()
-            peers = overview.connected_peers
-            now_utc = datetime.now(timezone.utc)
-            diff_online_24h: int | None = None
-            if self._state_store is not None:
-                baseline = self._state_store.get_ami_peer_snapshot_at_or_before(
-                    target_utc=now_utc - timedelta(hours=24)
-                )
-                if baseline is not None:
-                    diff_online_24h = (
-                        int(overview.online_count) - int(baseline["online_count"])
-                    )
-                self._state_store.record_ami_peer_snapshot(
-                    captured_at_utc=now_utc,
-                    online_count=overview.online_count,
-                    offline_count=overview.offline_count,
-                )
-            lines = [
-                "<b>VoIPs conectados (SIP)</b>",
-                f"Trace: <code>{html.escape(trace_id)}</code>",
-                f"Total ramais: <b>{overview.total_count}</b>",
-                f"Online: <b>{overview.online_count}</b>",
-                f"Offline: <b>{overview.offline_count}</b>",
-                (
-                    f"Diferença (24h): <b>{diff_online_24h}</b>"
-                    if diff_online_24h is not None
-                    else "Diferença (24h): <b>N/A</b>"
-                ),
-            ]
-            if not peers:
-                lines.append("Sem ramais online.")
-            else:
-                lines.append("Ramais online:")
-                for peer in peers:
-                    addr = f"{peer.ip}:{peer.port}" if peer.port is not None else peer.ip
-                    line = f"- {html.escape(peer.name)}: {html.escape(addr)}"
-                    if peer.status:
-                        line += f" | {html.escape(peer.status)}"
-                    lines.append(line)
+            overview, diff_online_24h = await self._resolve_voips_overview()
+            lines = self._build_voips_lines(
+                trace_id=trace_id,
+                overview=overview,
+                diff_online_24h=diff_online_24h,
+                include_trace=True,
+            )
             await self._reply_chunks(message, "\n".join(lines))
             self._record_audit(
                 trace_id=trace_id,
@@ -501,7 +470,7 @@ class BotHandlers:
                 severity="info",
                 payload={
                     "transport": ami_transport,
-                    "peer_count": len(peers),
+                    "peer_count": len(overview.connected_peers),
                     "online_count": overview.online_count,
                     "offline_count": overview.offline_count,
                     "total_count": overview.total_count,
@@ -516,7 +485,7 @@ class BotHandlers:
                 status="ok",
                 severity="info",
                 payload={
-                    "count": len(peers),
+                    "count": len(overview.connected_peers),
                     "online_count": overview.online_count,
                     "offline_count": overview.offline_count,
                     "total_count": overview.total_count,
@@ -668,13 +637,99 @@ class BotHandlers:
                 payload={"error": str(exc)},
             )
 
-    def _build_voip_message(self, result) -> str:
+    async def call_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        prepared = await self._prepare_command(update, command="/call")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        if not context.args or len(context.args) != 1:
+            await message.reply_text("Uso: /call <numero|ramal>")
+            return
+        target = str(context.args[0] or "").strip()
+        if not self.CALL_TARGET_RE.fullmatch(target):
+            await message.reply_text(
+                "Destino invalido. Use apenas digitos e opcionalmente +, * ou #."
+            )
+            return
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command="/call",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload={"target_number": target},
+        )
+        try:
+            result = await self._voip_provider.run_call(target)
+            call_status_level = self._classify_call_status(result)
+            call_status_label = (
+                "OK"
+                if call_status_level == "ok"
+                else ("WARN" if call_status_level == "warn" else "FALHA")
+            )
+            extra_lines: list[str] = []
+            if call_status_level == "warn":
+                extra_lines.append(
+                    "Observacao: 183 indica progresso SIP, sem confirmacao de toque real no aparelho."
+                )
+            await self._reply_chunks(
+                message,
+                self._build_voip_message(
+                    result,
+                    title="<b>VoIP Call Test</b>",
+                    status_label=call_status_label,
+                    extra_lines=extra_lines,
+                ),
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/call",
+                context=automation_context,
+                status="ok" if call_status_level in {"ok", "warn"} else "error",
+                severity=(
+                    "info"
+                    if call_status_level == "ok"
+                    else ("alerta" if call_status_level == "warn" else "critico")
+                ),
+                payload={
+                    "target_number": result.target_number,
+                    "setup_latency_ms": result.setup_latency_ms,
+                    "sip_final_code": result.sip_final_code,
+                    "error": result.error,
+                    "category": result.category,
+                    "status_level": call_status_level,
+                },
+            )
+        except Exception as exc:
+            await message.reply_text(f"Falha no /call: {exc}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/call",
+                context=automation_context,
+                status="error",
+                severity="critico",
+                payload={"target_number": target, "error": str(exc)},
+            )
+
+    def _build_voip_message(
+        self,
+        result,
+        *,
+        title: str = "<b>VoIP Probe</b>",
+        status_label: str | None = None,
+        extra_lines: list[str] | None = None,
+    ) -> str:
         started = _format_datetime(_parse_iso_datetime(result.started_at_utc), self._tzinfo)
         finished = _format_datetime(_parse_iso_datetime(result.finished_at_utc), self._tzinfo)
         lines = [
-            "<b>VoIP Probe</b>",
+            title,
             f"Destino: <b>{html.escape(result.target_number)}</b>",
-            f"Status: <b>{'OK' if result.ok else 'FALHA'}</b>",
+            f"Status: <b>{status_label or ('OK' if result.ok else 'FALHA')}</b>",
             f"Chamada completada: {'sim' if result.completed_call else 'nao'}",
             f"Sem problemas: {'sim' if result.no_issues else 'nao'}",
             (
@@ -692,6 +747,9 @@ class BotHandlers:
             f"Fim: {html.escape(finished)}",
             f"Erro: {html.escape(result.error or '-')}",
         ]
+        if extra_lines:
+            for line in extra_lines:
+                lines.append(html.escape(line))
         lines.extend(self._format_voip_matrix_lines(result))
         failure_human = self._build_voip_failure_human(result)
         if failure_human:
@@ -1022,7 +1080,7 @@ class BotHandlers:
             events = [
                 item
                 for item in events
-                if str(item.get("command") or "") in {"/voip", "/all"}
+                if str(item.get("command") or "") in {"/voip", "/call", "/all"}
                 or str(item.get("event_type") or "")
                 in {"voip_probe_tick", "all_voip_error", "all_voip_ok"}
             ][:limit]
@@ -1085,6 +1143,11 @@ class BotHandlers:
         )
         await self._execute_trigger(message, automation_context, "status")
         await self._execute_trigger(message, automation_context, "host")
+        await self._execute_voips_in_all(
+            message,
+            trace_id=trace_id,
+            automation_context=automation_context,
+        )
         await self._execute_voip_in_all(
             message,
             trace_id=trace_id,
@@ -1147,6 +1210,159 @@ class BotHandlers:
                     "rc": rc,
                 },
             )
+
+    async def _execute_voips_in_all(
+        self,
+        message: Message,
+        *,
+        trace_id: str,
+        automation_context: AutomationContext,
+    ) -> None:
+        ami_transport = self._issabel_provider.transport_name()
+        ami_endpoint = self._issabel_provider.endpoint_label()
+        try:
+            overview, diff_online_24h = await self._resolve_voips_overview()
+            lines = self._build_voips_lines(
+                trace_id=trace_id,
+                overview=overview,
+                diff_online_24h=diff_online_24h,
+                include_trace=True,
+            )
+            await self._reply_chunks(message, "\n".join(lines))
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="ami_all_ok",
+                command="/all",
+                context=automation_context,
+                status="ok",
+                severity="info",
+                payload={
+                    "transport": ami_transport,
+                    "endpoint": ami_endpoint,
+                    "online_count": overview.online_count,
+                    "offline_count": overview.offline_count,
+                    "total_count": overview.total_count,
+                    "diff_online_24h": diff_online_24h,
+                },
+            )
+        except ValueError:
+            error_text = "ISSABEL AMI nao configurado"
+            await self._reply_chunks(
+                message,
+                "<b>VoIPs conectados (SIP)</b>\n"
+                f"Falha no /voips: {html.escape(error_text)}",
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="ami_all_error",
+                command="/all",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "transport": ami_transport,
+                    "endpoint": ami_endpoint,
+                    "error": error_text,
+                    "phase": "connect",
+                },
+            )
+        except AmiError as exc:
+            error_text = str(exc)
+            await self._reply_chunks(
+                message,
+                "<b>VoIPs conectados (SIP)</b>\n"
+                f"Falha no /voips: {html.escape(error_text)}",
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="ami_all_error",
+                command="/all",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "transport": ami_transport,
+                    "endpoint": ami_endpoint,
+                    "error": error_text,
+                    "phase": self._detect_ami_phase(error_text),
+                },
+            )
+        except Exception as exc:
+            error_text = str(exc)
+            await self._reply_chunks(
+                message,
+                "<b>VoIPs conectados (SIP)</b>\n"
+                f"Falha no /voips: {html.escape(error_text)}",
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="ami_all_error",
+                command="/all",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "transport": ami_transport,
+                    "endpoint": ami_endpoint,
+                    "error": error_text,
+                    "phase": self._detect_ami_phase(error_text),
+                },
+            )
+
+    async def _resolve_voips_overview(self):
+        overview = await self._issabel_provider.list_voip_overview()
+        diff_online_24h: int | None = None
+        if self._state_store is not None:
+            now_utc = datetime.now(timezone.utc)
+            baseline = self._state_store.get_ami_peer_snapshot_at_or_before(
+                target_utc=now_utc - timedelta(hours=24)
+            )
+            if baseline is not None:
+                diff_online_24h = int(overview.online_count) - int(
+                    baseline["online_count"]
+                )
+            self._state_store.record_ami_peer_snapshot(
+                captured_at_utc=now_utc,
+                online_count=overview.online_count,
+                offline_count=overview.offline_count,
+            )
+        return overview, diff_online_24h
+
+    @staticmethod
+    def _build_voips_lines(
+        *,
+        trace_id: str,
+        overview,
+        diff_online_24h: int | None,
+        include_trace: bool,
+    ) -> list[str]:
+        lines = ["<b>VoIPs conectados (SIP)</b>"]
+        if include_trace:
+            lines.append(f"Trace: <code>{html.escape(trace_id)}</code>")
+        lines.extend(
+            [
+                f"Total ramais: <b>{overview.total_count}</b>",
+                f"Online: <b>{overview.online_count}</b>",
+                f"Offline: <b>{overview.offline_count}</b>",
+                (
+                    f"Diferenca (24h): <b>{diff_online_24h}</b>"
+                    if diff_online_24h is not None
+                    else "Diferenca (24h): <b>N/A</b>"
+                ),
+            ]
+        )
+        peers = list(overview.connected_peers)
+        if not peers:
+            lines.append("Sem ramais online.")
+        else:
+            lines.append("Ramais online:")
+            for peer in peers:
+                addr = f"{peer.ip}:{peer.port}" if peer.port is not None else peer.ip
+                line = f"- {html.escape(peer.name)}: {html.escape(addr)}"
+                if peer.status:
+                    line += f" | {html.escape(peer.status)}"
+                lines.append(line)
+        return lines
 
     async def text_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1216,10 +1432,10 @@ class BotHandlers:
             await message.reply_text(self.BLOCKED_MESSAGE)
             return None
         automation_context = self._build_context(update, trace_id, command=command)
-        if self._state_store is not None and command in {"/voip", "/ping"}:
+        if self._state_store is not None and command in {"/voip", "/call", "/ping"}:
             cooldown = (
                 self._settings.rate_limit_voip_seconds
-                if command == "/voip"
+                if command in {"/voip", "/call"}
                 else self._settings.rate_limit_ping_seconds
             )
             rate_key = f"rate:{chat.id}:{command}"
@@ -1519,6 +1735,17 @@ class BotHandlers:
         return f"falha desconhecida para {number} ({sip_text})."
 
     @staticmethod
+    def _classify_call_status(result) -> str:
+        if not bool(result.ok):
+            return "fail"
+        sip_code = result.sip_final_code
+        if sip_code == 183:
+            return "warn"
+        if sip_code in {180, 200}:
+            return "ok"
+        return "fail"
+
+    @staticmethod
     def _voip_category_label(category: str | None) -> str:
         normalized = (category or "").strip().lower()
         if not normalized:
@@ -1577,6 +1804,7 @@ class BotHandlers:
         rc = payload.get("rc")
         stage = str(payload.get("stage") or "").strip()
         sip_code = payload.get("sip_final_code")
+        status_level = str(payload.get("status_level") or "").strip().lower()
         ami_parts: list[str] = []
         if transport:
             ami_parts.append(transport)
@@ -1600,6 +1828,8 @@ class BotHandlers:
             suffix_parts.append(f"stage={html.escape(stage)}")
         if sip_code is not None:
             suffix_parts.append(f"sip={html.escape(str(sip_code))}")
+        if status_level == "warn":
+            suffix_parts.append("status_level=warn")
         if not suffix_parts:
             return ""
         return " | " + " | ".join(suffix_parts)
@@ -1627,3 +1857,4 @@ def _format_datetime(value: datetime | None, tzinfo) -> str:
     if value is None:
         return "indisponivel"
     return value.astimezone(tzinfo).strftime("%d/%m/%Y %H:%M")
+

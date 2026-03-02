@@ -150,6 +150,7 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("ssl", bot_handlers.ssl_handler))
     application.add_handler(CommandHandler("voips", bot_handlers.voips_handler))
     application.add_handler(CommandHandler("voip", bot_handlers.voip_handler))
+    application.add_handler(CommandHandler("call", bot_handlers.call_handler))
     application.add_handler(CommandHandler("voip_logs", bot_handlers.voip_logs_handler))
     application.add_handler(CommandHandler("note", bot_handlers.note_handler))
     application.add_handler(CommandHandler("lembrete", bot_handlers.lembrete_handler))

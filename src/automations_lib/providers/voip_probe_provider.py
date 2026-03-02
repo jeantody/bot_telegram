@@ -70,6 +70,15 @@ class VoipProbeProvider:
         payload = await self._run_json_command(["run-once", "--json"])
         return self._parse_result(payload)
 
+    async def run_call(self, number: str) -> VoipProbeResult:
+        destination = str(number or "").strip()
+        if not destination:
+            raise RuntimeError("destino de chamada vazio")
+        payload = await self._run_json_command(
+            ["run-call", "--number", destination, "--json"]
+        )
+        return self._parse_result(payload)
+
     async def list_logs(self, *, limit: int = 10) -> list[VoipProbeLogEntry]:
         safe_limit = max(1, min(50, int(limit)))
         payload = await self._run_json_command(["logs", "--limit", str(safe_limit), "--json"])

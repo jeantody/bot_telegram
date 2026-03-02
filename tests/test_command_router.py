@@ -128,6 +128,44 @@ class FakeVoipProvider:
             },
         )
 
+    async def run_call(self, number: str) -> VoipProbeResult:
+        return VoipProbeResult(
+            ok=True,
+            completed_call=False,
+            no_issues=True,
+            target_number=number,
+            hold_seconds=5,
+            setup_latency_ms=620,
+            total_duration_ms=2300,
+            sip_final_code=183,
+            error=None,
+            started_at_utc="2026-02-16T10:00:00+00:00",
+            finished_at_utc="2026-02-16T10:00:02+00:00",
+            mode="single_call_v1",
+            run_id="call-run-1",
+            destinations=[
+                {
+                    "key": "target",
+                    "number": number,
+                    "no_issues": True,
+                    "setup_latency_ms": 620,
+                    "sip_final_code": 183,
+                    "category": None,
+                    "options": {"ok": True, "sip_final_code": 200, "sip_status_text": "200 OK"},
+                    "invite": {
+                        "ok": True,
+                        "sip_final_code": 183,
+                        "sip_status_text": "183 Session Progress",
+                    },
+                }
+            ],
+            summary={
+                "total_destinations": 1,
+                "successful_destinations": 1,
+                "failed_destinations": 0,
+            },
+        )
+
     async def list_logs(self, *, limit: int = 10) -> list[VoipProbeLogEntry]:
         del limit
         return [
@@ -173,6 +211,36 @@ class FakeVoipProviderLongError(FakeVoipProvider):
 class FakeVoipProviderRunError(FakeVoipProvider):
     async def run_once(self) -> VoipProbeResult:
         raise RuntimeError("voip probe terminated by SIGTERM (rc=-15) [run-once]")
+
+
+@dataclass
+class FakeAmiPeer:
+    name: str
+    ip: str
+    port: int | None
+    status: str | None
+
+
+@dataclass
+class FakeAmiOverview:
+    total_count: int
+    online_count: int
+    offline_count: int
+    connected_peers: list[FakeAmiPeer]
+
+
+class FakeIssabelProvider:
+    def __init__(self, overview: FakeAmiOverview) -> None:
+        self._overview = overview
+
+    async def list_voip_overview(self):
+        return self._overview
+
+    def transport_name(self) -> str:
+        return "http_rawman"
+
+    def endpoint_label(self) -> str:
+        return "coalapabx.ddns.net:8088/asterisk/rawman"
 
 
 def build_settings(allowed_chat_id: int | None) -> Settings:
@@ -247,6 +315,19 @@ def test_is_health_command_variants() -> None:
 
 
 @pytest.mark.asyncio
+async def test_help_command_includes_voips() -> None:
+    orchestrator = FakeOrchestrator({})
+    handlers = BotHandlers(settings=build_settings(allowed_chat_id=123), orchestrator=orchestrator)
+    update = FakeUpdate(text="/help", chat_id=123)
+
+    await handlers.help_handler(update, FakeContext())
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "/voips" in combined
+    assert "/call" in combined
+
+
+@pytest.mark.asyncio
 async def test_status_text_sends_four_messages() -> None:
     orchestrator = FakeOrchestrator(
         {"status": [result("m1"), result("m2"), result("m3"), result("m4")]}
@@ -299,6 +380,17 @@ async def test_all_command_runs_status_then_host() -> None:
         settings=build_settings(allowed_chat_id=123),
         orchestrator=orchestrator,
         voip_provider=FakeVoipProvider(),
+        issabel_provider=FakeIssabelProvider(
+            FakeAmiOverview(
+                total_count=3,
+                online_count=2,
+                offline_count=1,
+                connected_peers=[
+                    FakeAmiPeer(name="1101", ip="10.0.0.1", port=5060, status="OK"),
+                    FakeAmiPeer(name="1102", ip="10.0.0.2", port=5061, status="OK"),
+                ],
+            )
+        ),
     )
     update = FakeUpdate(text="/all", chat_id=123)
 
@@ -312,9 +404,12 @@ async def test_all_command_runs_status_then_host() -> None:
         "s4",
         "h1",
     ]
-    assert "VoIP Probe" in update.message.replies[5]["text"]
-    assert update.message.replies[6]["text"].startswith("<b>Lembretes de hoje")
-    assert update.message.replies[7]["text"].startswith("<b>Lembretes de amanha")
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "VoIPs conectados (SIP)" in combined
+    assert "Total ramais: <b>3</b>" in combined
+    assert "VoIP Probe" in combined
+    assert any(item["text"].startswith("<b>Lembretes de hoje") for item in update.message.replies)
+    assert any(item["text"].startswith("<b>Lembretes de amanha") for item in update.message.replies)
 
 
 @pytest.mark.asyncio
@@ -346,6 +441,74 @@ async def test_voip_command_runs_probe_and_replies() -> None:
     assert "Destino" in combined
     assert "Matriz" in combined
     assert "Resumo" in combined
+
+
+@pytest.mark.asyncio
+async def test_call_command_runs_single_probe_and_replies() -> None:
+    orchestrator = FakeOrchestrator({})
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        voip_provider=FakeVoipProvider(),
+    )
+    update = FakeUpdate(text="/call 1102", chat_id=123)
+
+    await handlers.call_handler(update, FakeContext(args=["1102"]))
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "VoIP Call Test" in combined
+    assert "Destino: <b>1102</b>" in combined
+    assert "Status: <b>WARN</b>" in combined
+    assert "183 indica progresso SIP" in combined
+
+
+@pytest.mark.asyncio
+async def test_call_command_requires_number() -> None:
+    orchestrator = FakeOrchestrator({})
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        voip_provider=FakeVoipProvider(),
+    )
+    update = FakeUpdate(text="/call", chat_id=123)
+
+    await handlers.call_handler(update, FakeContext(args=[]))
+
+    assert any("Uso: /call <numero|ramal>" in item["text"] for item in update.message.replies)
+
+
+@pytest.mark.asyncio
+async def test_call_command_rejects_invalid_number() -> None:
+    orchestrator = FakeOrchestrator({})
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        voip_provider=FakeVoipProvider(),
+    )
+    update = FakeUpdate(text="/call abcd", chat_id=123)
+
+    await handlers.call_handler(update, FakeContext(args=["abcd"]))
+
+    assert any("Destino invalido" in item["text"] for item in update.message.replies)
+
+
+@pytest.mark.asyncio
+async def test_call_command_is_rate_limited(tmp_path) -> None:
+    orchestrator = FakeOrchestrator({})
+    store = BotStateStore(str(tmp_path / "state.db"))
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        state_store=store,
+        voip_provider=FakeVoipProvider(),
+    )
+    update1 = FakeUpdate(text="/call 1102", chat_id=123)
+    update2 = FakeUpdate(text="/call 1102", chat_id=123)
+
+    await handlers.call_handler(update1, FakeContext(args=["1102"]))
+    await handlers.call_handler(update2, FakeContext(args=["1102"]))
+
+    assert any("Rate limit:" in item["text"] for item in update2.message.replies)
 
 
 @pytest.mark.asyncio
@@ -546,6 +709,7 @@ async def test_logs_command_voip_filter_includes_voip_details(tmp_path) -> None:
             "rc": -15,
             "stage": "voip_in_all",
             "sip_final_code": 200,
+            "status_level": "warn",
         },
     )
     handlers = BotHandlers(
@@ -562,6 +726,7 @@ async def test_logs_command_voip_filter_includes_voip_details(tmp_path) -> None:
     assert "all_voip_error" in combined
     assert "rc=-15" in combined
     assert "stage=voip_in_all" in combined
+    assert "status_level=warn" in combined
 
 
 @pytest.mark.asyncio

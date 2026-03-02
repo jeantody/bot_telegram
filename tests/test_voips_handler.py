@@ -156,7 +156,7 @@ async def test_voips_handler_lists_connected_peers_and_audits(tmp_path) -> None:
     assert "Total ramais: <b>3</b>" in combined
     assert "Online: <b>2</b>" in combined
     assert "Offline: <b>1</b>" in combined
-    assert "Diferença (24h): <b>N/A</b>" in combined
+    assert "Diferenca (24h): <b>N/A</b>" in combined
     assert "Ramais online:" in combined
     assert "- 1001: 10.0.0.1:5060 | OK (12 ms)" in combined
     assert "- 1002: 10.0.0.2" in combined
@@ -207,7 +207,7 @@ async def test_voips_handler_shows_diff_vs_24h_online(tmp_path) -> None:
     await handlers.voips_handler(update, context=None)  # type: ignore[arg-type]
 
     combined = "\n".join(item["text"] for item in update.message.replies)
-    assert "Diferença (24h): <b>-1</b>" in combined
+    assert "Diferenca (24h): <b>-1</b>" in combined
 
 
 @pytest.mark.asyncio

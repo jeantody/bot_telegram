@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, time, timedelta, timezone
+import html
 import hashlib
 import logging
 import re
@@ -13,6 +14,8 @@ from telegram.ext import Application
 
 from src.automations_lib.models import AutomationContext, AutomationResult
 from src.automations_lib.orchestrator import StatusOrchestrator
+from src.automations_lib.providers.ami_client import AmiError
+from src.automations_lib.providers.issabel_ami_provider import IssabelAmiProvider
 from src.config import AlertPriorityRule, Settings
 from src.message_utils import split_message
 from src.state_store import BotStateStore
@@ -22,12 +25,15 @@ logger = logging.getLogger(__name__)
 
 
 class ProactiveService:
+    AMI_ONLINE_DROP_ALERT_DELTA = -2
+
     def __init__(
         self,
         application: Application,
         settings: Settings,
         orchestrator: StatusOrchestrator,
         state_store: BotStateStore,
+        issabel_provider: IssabelAmiProvider | None = None,
     ) -> None:
         self._application = application
         self._settings = settings
@@ -40,6 +46,16 @@ class ProactiveService:
         self._morning_time = self._parse_hhmm(settings.proactive_morning_time)
         self._night_time = self._parse_hhmm(settings.proactive_night_time)
         self._tzinfo = self._resolve_timezone(settings.bot_timezone)
+        self._issabel_provider = issabel_provider or IssabelAmiProvider(
+            host=settings.issabel_ami_host,
+            rawman_url=settings.issabel_ami_rawman_url,
+            port=settings.issabel_ami_port,
+            username=settings.issabel_ami_username,
+            secret=settings.issabel_ami_secret,
+            timeout_seconds=settings.issabel_ami_timeout_seconds,
+            use_tls=settings.issabel_ami_use_tls,
+            peer_name_regex=settings.issabel_ami_peer_name_regex,
+        )
 
     async def start(self) -> None:
         if not self._settings.proactive_enabled:
@@ -115,6 +131,141 @@ class ProactiveService:
                 rule,
                 is_recovery=is_recovery,
             )
+        await self._run_ami_check(trace_id)
+
+    async def _run_ami_check(self, trace_id: str) -> None:
+        chat_id = self._settings.telegram_allowed_chat_id
+        try:
+            overview = await self._issabel_provider.list_voip_overview()
+        except ValueError:
+            self._state_store.record_audit_event(
+                trace_id=trace_id,
+                event_type="ami_probe_tick",
+                command="/host",
+                chat_id=chat_id,
+                user_id=None,
+                username="proactive-service",
+                status="ok",
+                severity="info",
+                payload={"configured": False, "reason": "not_configured"},
+            )
+            return
+        except AmiError as exc:
+            await self._handle_ami_error(trace_id, str(exc))
+            return
+        except Exception as exc:
+            await self._handle_ami_error(trace_id, str(exc))
+            return
+
+        now_utc = datetime.now(timezone.utc)
+        self._state_store.record_ami_peer_snapshot(
+            captured_at_utc=now_utc,
+            online_count=overview.online_count,
+            offline_count=overview.offline_count,
+        )
+        changed, previous = self._state_store.compare_and_set_state(
+            "proactive:ami:online_count",
+            str(overview.online_count),
+        )
+        # Reset previous error signature on successful probe.
+        self._state_store.compare_and_set_state("proactive:ami:last_error_signature", "")
+        previous_online: int | None = None
+        if previous is not None:
+            try:
+                previous_online = int(str(previous).strip())
+            except ValueError:
+                previous_online = None
+        diff_online_prev: int | None = None
+        drop_detected = False
+        if previous_online is not None:
+            diff_online_prev = int(overview.online_count) - previous_online
+            drop_detected = (
+                changed
+                and diff_online_prev < self.AMI_ONLINE_DROP_ALERT_DELTA
+            )
+
+        self._state_store.record_audit_event(
+            trace_id=trace_id,
+            event_type="ami_probe_tick",
+            command="/host",
+            chat_id=chat_id,
+            user_id=None,
+            username="proactive-service",
+            status="ok",
+            severity="alerta" if drop_detected else "info",
+            payload={
+                "transport": self._issabel_provider.transport_name(),
+                "endpoint": self._issabel_provider.endpoint_label(),
+                "online_count": overview.online_count,
+                "offline_count": overview.offline_count,
+                "total_count": overview.total_count,
+                "diff_online_prev": diff_online_prev,
+                "drop_alert_threshold": self.AMI_ONLINE_DROP_ALERT_DELTA,
+            },
+        )
+        if drop_detected and chat_id is not None:
+            await self._notify_ami_alert(
+                trace_id=trace_id,
+                severity="alerta",
+                details=(
+                    "Queda de ramais online detectada\n"
+                    f"Online: {overview.online_count}\n"
+                    f"Offline: {overview.offline_count}\n"
+                    f"Diferenca vs coleta anterior: {diff_online_prev}"
+                ),
+            )
+
+    async def _handle_ami_error(self, trace_id: str, error_text: str) -> None:
+        chat_id = self._settings.telegram_allowed_chat_id
+        signature = error_text.strip().lower() or "unknown"
+        changed, previous = self._state_store.compare_and_set_state(
+            "proactive:ami:last_error_signature",
+            signature,
+        )
+        self._state_store.record_audit_event(
+            trace_id=trace_id,
+            event_type="ami_probe_tick",
+            command="/host",
+            chat_id=chat_id,
+            user_id=None,
+            username="proactive-service",
+            status="error",
+            severity="alerta",
+            payload={
+                "transport": self._issabel_provider.transport_name(),
+                "endpoint": self._issabel_provider.endpoint_label(),
+                "error": error_text,
+                "phase": self._detect_ami_phase(error_text),
+            },
+        )
+        if chat_id is None:
+            return
+        if previous is not None and not changed:
+            return
+        await self._notify_ami_alert(
+            trace_id=trace_id,
+            severity="alerta",
+            details=f"Falha AMI: {error_text}",
+        )
+
+    async def _notify_ami_alert(
+        self,
+        *,
+        trace_id: str,
+        severity: str,
+        details: str,
+    ) -> None:
+        chat_id = self._settings.telegram_allowed_chat_id
+        if chat_id is None:
+            return
+        text = (
+            "<b>Alerta Proativo</b>\n"
+            f"Severidade: <b>{severity.upper()}</b>\n"
+            "Fonte: AMI\n"
+            f"Trace: <code>{trace_id}</code>\n\n"
+            f"{html.escape(details)}"
+        )
+        await self._send_text(chat_id, text)
 
     async def _run_daily_summaries_if_due(self, now_local: datetime) -> None:
         date_key = now_local.strftime("%Y-%m-%d")
@@ -267,6 +418,21 @@ class ProactiveService:
     @staticmethod
     def _strip_html(text: str) -> str:
         return re.sub(r"<[^>]*>", "", text)
+
+    @staticmethod
+    def _detect_ami_phase(error_text: str | None) -> str | None:
+        text = (error_text or "").strip().lower()
+        if not text:
+            return None
+        if "login" in text:
+            return "login"
+        if "sippeers" in text:
+            return "sippeers"
+        if "logoff" in text:
+            return "logoff"
+        if "connect" in text or "connection" in text or "timeout" in text:
+            return "connect"
+        return None
 
     @staticmethod
     def _parse_hhmm(value: str) -> time:

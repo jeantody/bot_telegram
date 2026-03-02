@@ -9,6 +9,7 @@ from tools.voip_probe.config import VoipProbeSettings
 from tools.voip_probe.sipp_runner import (
     _build_matrix_targets,
     build_sipp_command,
+    run_single_call_probe,
     run_voip_probe,
 )
 
@@ -126,3 +127,46 @@ def test_build_matrix_targets_returns_target_and_external_only(tmp_path: Path) -
         ("external", settings.external_reference_number),
     ]
     assert all(key != "self" for key, _ in targets)
+
+
+def test_run_single_call_probe_executes_single_destination(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings = _settings(tmp_path)
+    called_targets: list[str] = []
+    invite_scenario_text = {"value": ""}
+
+    def fake_run(command, **kwargs):
+        s_index = command.index("-s")
+        target = command[s_index + 1]
+        called_targets.append(target)
+        sf_index = command.index("-sf")
+        scenario_path = Path(command[sf_index + 1])
+        if len(called_targets) == 3:
+            invite_scenario_text["value"] = scenario_path.read_text(encoding="utf-8")
+        call_index = len(called_targets)
+        if call_index == 1:
+            stdout = "SIP/2.0 200 OK"
+        elif call_index == 2:
+            stdout = "SIP/2.0 200 OK"
+        else:
+            stdout = "SIP/2.0 183 Session Progress"
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = run_single_call_probe(settings, destination_number="977811366")
+
+    assert result.mode == "single_call_v1"
+    assert result.target_number == "977811366"
+    assert len(result.destinations) == 1
+    assert called_targets[0] == settings.sip_login  # register
+    assert called_targets[1] == "977811366"  # options
+    assert called_targets[2] == "977811366"  # invite
+    assert result.sip_final_code in {180, 183, 200}
+    assert invite_scenario_text["value"]
+    assert '<pause milliseconds="2000" />' in invite_scenario_text["value"]

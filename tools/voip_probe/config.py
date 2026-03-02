@@ -45,7 +45,7 @@ class VoipProbeSettings:
     latency_alert_ms: int = 1500
     baseline_timezone: str = "America/Sao_Paulo"
 
-    def validate(self) -> None:
+    def validate(self, *, require_external_reference: bool = True) -> None:
         if not self.sipp_bin:
             raise ValueError("VOIP_SIPP_BIN vazio.")
         if not self.sip_server:
@@ -58,7 +58,7 @@ class VoipProbeSettings:
             raise ValueError("VOIP_CALLER_ID vazio.")
         if not self.target_number:
             raise ValueError("VOIP_TARGET_NUMBER vazio.")
-        if not self.external_reference_number:
+        if require_external_reference and not self.external_reference_number:
             raise ValueError("VOIP_EXTERNAL_REFERENCE_NUMBER vazio.")
         if self.sip_port <= 0:
             raise ValueError("VOIP_SIP_PORT invalido.")
@@ -80,7 +80,11 @@ class VoipProbeSettings:
             raise ValueError("VOIP_RESULTS_DB_PATH vazio.")
 
 
-def load_settings_from_env(*, validate: bool = True) -> VoipProbeSettings:
+def load_settings_from_env(
+    *,
+    validate: bool = True,
+    require_external_reference: bool = True,
+) -> VoipProbeSettings:
     # Ensure local .env wins over stale shell/system environment values.
     load_dotenv(override=True)
 
@@ -116,5 +120,5 @@ def load_settings_from_env(*, validate: bool = True) -> VoipProbeSettings:
         or "America/Sao_Paulo",
     )
     if validate:
-        settings.validate()
+        settings.validate(require_external_reference=require_external_reference)
     return settings

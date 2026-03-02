@@ -11,7 +11,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from tools.voip_probe.config import load_settings_from_env
-from tools.voip_probe.sipp_runner import run_voip_probe
+from tools.voip_probe.sipp_runner import run_single_call_probe, run_voip_probe
 from tools.voip_probe.storage import VoipProbeStorage
 
 
@@ -21,6 +21,10 @@ def build_parser() -> ArgumentParser:
 
     run_once = subparsers.add_parser("run-once", help="Run a single SIP probe.")
     run_once.add_argument("--json", action="store_true", dest="as_json")
+
+    run_call = subparsers.add_parser("run-call", help="Run a single destination call probe.")
+    run_call.add_argument("--number", required=True)
+    run_call.add_argument("--json", action="store_true", dest="as_json")
 
     logs = subparsers.add_parser("logs", help="Read probe history.")
     logs.add_argument("--limit", type=int, default=10)
@@ -33,7 +37,10 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
-        settings = load_settings_from_env(validate=args.command == "run-once")
+        settings = load_settings_from_env(
+            validate=args.command in {"run-once", "run-call"},
+            require_external_reference=args.command == "run-once",
+        )
         storage = VoipProbeStorage(settings.results_db_path)
     except Exception as exc:
         return _print_error_and_exit(exc, as_json=getattr(args, "as_json", False))
@@ -41,6 +48,25 @@ def main() -> int:
     try:
         if args.command == "run-once":
             result = run_voip_probe(settings)
+            payload = result.to_dict()
+            _apply_baseline(payload=payload, storage=storage, settings=settings)
+            storage.insert_result(payload)
+            storage.purge_older_than_days(settings.retention_days)
+            if args.as_json:
+                print(json.dumps(payload, ensure_ascii=False))
+            else:
+                status = "OK" if payload["ok"] else "FALHA"
+                print(
+                    f"[{status}] target={payload['target_number']} "
+                    f"latency={payload['setup_latency_ms']}ms "
+                    f"sip={payload['sip_final_code']} "
+                    f"error={payload['error'] or '-'}"
+                )
+            return 0
+
+        if args.command == "run-call":
+            destination = str(args.number or "").strip()
+            result = run_single_call_probe(settings, destination_number=destination)
             payload = result.to_dict()
             _apply_baseline(payload=payload, storage=storage, settings=settings)
             storage.insert_result(payload)
