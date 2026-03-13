@@ -126,6 +126,7 @@ class BotStateStore:
                 )
                 """
             )
+            self._ensure_ami_peer_snapshot_columns(cursor)
             cursor.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_ami_peer_snapshots_created_at
@@ -133,6 +134,17 @@ class BotStateStore:
                 """
             )
             self._connection.commit()
+
+    @staticmethod
+    def _ensure_ami_peer_snapshot_columns(cursor: sqlite3.Cursor) -> None:
+        columns = {
+            str(row["name"]) if isinstance(row, sqlite3.Row) else str(row[1])
+            for row in cursor.execute("PRAGMA table_info(ami_peer_snapshots)").fetchall()
+        }
+        if "connected_peers_json" not in columns:
+            cursor.execute(
+                "ALTER TABLE ami_peer_snapshots ADD COLUMN connected_peers_json TEXT"
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -494,20 +506,26 @@ class BotStateStore:
         captured_at_utc: datetime,
         online_count: int,
         offline_count: int,
+        connected_peers: list[object] | None = None,
     ) -> None:
         created_at = captured_at_utc.astimezone(timezone.utc).isoformat()
         online = max(0, int(online_count))
         offline = max(0, int(offline_count))
         total = online + offline
+        connected_peers_json = json.dumps(
+            _normalize_ami_connected_peers(connected_peers),
+            ensure_ascii=False,
+        )
         with self._lock:
             cursor = self._connection.cursor()
             cursor.execute(
                 """
                 INSERT INTO ami_peer_snapshots (
-                    created_at, online_count, offline_count, total_count
-                ) VALUES (?, ?, ?, ?)
+                    created_at, online_count, offline_count, total_count,
+                    connected_peers_json
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (created_at, online, offline, total),
+                (created_at, online, offline, total, connected_peers_json),
             )
             self._connection.commit()
 
@@ -521,7 +539,8 @@ class BotStateStore:
             cursor = self._connection.cursor()
             row = cursor.execute(
                 """
-                SELECT created_at, online_count, offline_count, total_count
+                SELECT created_at, online_count, offline_count, total_count,
+                       connected_peers_json
                 FROM ami_peer_snapshots
                 WHERE created_at <= ?
                 ORDER BY created_at DESC
@@ -536,6 +555,9 @@ class BotStateStore:
             "online_count": int(row["online_count"]),
             "offline_count": int(row["offline_count"]),
             "total_count": int(row["total_count"]),
+            "connected_peers": _deserialize_ami_connected_peers(
+                row["connected_peers_json"]
+            ),
         }
 
 def _resolve_timezone(timezone_name: str):
@@ -560,3 +582,48 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         "send_attempts": int(row["send_attempts"]),
         "last_error": row["last_error"],
     }
+
+
+def _normalize_ami_connected_peers(connected_peers: list[object] | None) -> list[dict]:
+    normalized: list[dict] = []
+    for item in connected_peers or []:
+        if isinstance(item, dict):
+            raw_name = item.get("name")
+            raw_ip = item.get("ip")
+            raw_port = item.get("port")
+            raw_status = item.get("status")
+        else:
+            raw_name = getattr(item, "name", None)
+            raw_ip = getattr(item, "ip", None)
+            raw_port = getattr(item, "port", None)
+            raw_status = getattr(item, "status", None)
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        ip = str(raw_ip or "").strip()
+        try:
+            port = int(raw_port) if raw_port not in (None, "") else None
+        except (TypeError, ValueError):
+            port = None
+        status = str(raw_status).strip() if raw_status not in (None, "") else None
+        normalized.append(
+            {
+                "name": name,
+                "ip": ip,
+                "port": port,
+                "status": status,
+            }
+        )
+    return normalized
+
+
+def _deserialize_ami_connected_peers(payload_json: str | None) -> list[dict]:
+    if not payload_json:
+        return []
+    try:
+        decoded = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(decoded, list):
+        return []
+    return _normalize_ami_connected_peers(decoded)

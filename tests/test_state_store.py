@@ -202,6 +202,10 @@ def test_ami_peer_snapshot_records_and_reads_24h_baseline(tmp_path: Path) -> Non
         captured_at_utc=older,
         online_count=10,
         offline_count=2,
+        connected_peers=[
+            {"name": "1101", "ip": "10.0.0.1", "port": 5060, "status": "OK (4 ms)"},
+            {"name": "1102", "ip": "10.0.0.2", "port": 5060, "status": "OK (7 ms)"},
+        ],
     )
     store.record_ami_peer_snapshot(
         captured_at_utc=newer,
@@ -214,3 +218,62 @@ def test_ami_peer_snapshot_records_and_reads_24h_baseline(tmp_path: Path) -> Non
     assert snapshot["online_count"] == 10
     assert snapshot["offline_count"] == 2
     assert snapshot["total_count"] == 12
+    assert snapshot["connected_peers"] == [
+        {"name": "1101", "ip": "10.0.0.1", "port": 5060, "status": "OK (4 ms)"},
+        {"name": "1102", "ip": "10.0.0.2", "port": 5060, "status": "OK (7 ms)"},
+    ]
+
+
+def test_ami_peer_snapshot_old_rows_without_peer_json_return_empty_list(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = BotStateStore(str(db_path))
+    now = datetime(2026, 2, 27, 12, 0, 0, tzinfo=timezone.utc)
+
+    store.record_ami_peer_snapshot(
+        captured_at_utc=now,
+        online_count=10,
+        offline_count=2,
+    )
+
+    snapshot = store.get_ami_peer_snapshot_at_or_before(target_utc=now)
+    assert snapshot is not None
+    assert snapshot["connected_peers"] == []
+
+
+def test_ami_peer_snapshot_migrates_old_schema_and_persists_peer_details(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        CREATE TABLE ami_peer_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            online_count INTEGER NOT NULL,
+            offline_count INTEGER NOT NULL,
+            total_count INTEGER NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    store = BotStateStore(str(db_path))
+    now = datetime(2026, 2, 27, 12, 0, 0, tzinfo=timezone.utc)
+    store.record_ami_peer_snapshot(
+        captured_at_utc=now,
+        online_count=8,
+        offline_count=4,
+        connected_peers=[
+            {"name": "2201", "ip": "10.0.1.8", "port": 5060, "status": "OK (12 ms)"}
+        ],
+    )
+
+    snapshot = store.get_ami_peer_snapshot_at_or_before(target_utc=now)
+    assert snapshot is not None
+    assert snapshot["connected_peers"] == [
+        {"name": "2201", "ip": "10.0.1.8", "port": 5060, "status": "OK (12 ms)"}
+    ]

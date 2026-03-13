@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 class ProactiveService:
     AMI_ONLINE_DROP_ALERT_DELTA = -2
+    AMI_ALERT_QUIET_START = time(hour=18, minute=0)
+    AMI_ALERT_QUIET_END = time(hour=7, minute=0)
 
     def __init__(
         self,
@@ -131,10 +133,16 @@ class ProactiveService:
                 rule,
                 is_recovery=is_recovery,
             )
-        await self._run_ami_check(trace_id)
+        await self._run_ami_check(trace_id, now_local=now_local)
 
-    async def _run_ami_check(self, trace_id: str) -> None:
+    async def _run_ami_check(
+        self,
+        trace_id: str,
+        *,
+        now_local: datetime | None = None,
+    ) -> None:
         chat_id = self._settings.telegram_allowed_chat_id
+        current_local = now_local or datetime.now(self._tzinfo)
         try:
             overview = await self._issabel_provider.list_voip_overview()
         except ValueError:
@@ -151,17 +159,29 @@ class ProactiveService:
             )
             return
         except AmiError as exc:
-            await self._handle_ami_error(trace_id, str(exc))
+            await self._handle_ami_error(
+                trace_id,
+                str(exc),
+                now_local=current_local,
+            )
             return
         except Exception as exc:
-            await self._handle_ami_error(trace_id, str(exc))
+            await self._handle_ami_error(
+                trace_id,
+                str(exc),
+                now_local=current_local,
+            )
             return
 
         now_utc = datetime.now(timezone.utc)
+        previous_snapshot = self._state_store.get_ami_peer_snapshot_at_or_before(
+            target_utc=now_utc - timedelta(microseconds=1)
+        )
         self._state_store.record_ami_peer_snapshot(
             captured_at_utc=now_utc,
             online_count=overview.online_count,
             offline_count=overview.offline_count,
+            connected_peers=overview.connected_peers,
         )
         changed, previous = self._state_store.compare_and_set_state(
             "proactive:ami:online_count",
@@ -183,6 +203,26 @@ class ProactiveService:
                 changed
                 and diff_online_prev < self.AMI_ONLINE_DROP_ALERT_DELTA
             )
+        dropped_peers = self._build_dropped_peers(
+            previous_snapshot=previous_snapshot,
+            current_connected_peers=overview.connected_peers,
+        )
+        suppression_reason = self._get_ami_alert_suppression_reason(current_local)
+        payload = {
+            "transport": self._issabel_provider.transport_name(),
+            "endpoint": self._issabel_provider.endpoint_label(),
+            "online_count": overview.online_count,
+            "offline_count": overview.offline_count,
+            "total_count": overview.total_count,
+            "diff_online_prev": diff_online_prev,
+            "drop_alert_threshold": self.AMI_ONLINE_DROP_ALERT_DELTA,
+            "drop_detected": drop_detected,
+        }
+        if dropped_peers:
+            payload["dropped_peers"] = dropped_peers
+        if suppression_reason is not None:
+            payload["alert_suppressed"] = True
+            payload["suppression_reason"] = suppression_reason
 
         self._state_store.record_audit_event(
             trace_id=trace_id,
@@ -193,35 +233,44 @@ class ProactiveService:
             username="proactive-service",
             status="ok",
             severity="alerta" if drop_detected else "info",
-            payload={
-                "transport": self._issabel_provider.transport_name(),
-                "endpoint": self._issabel_provider.endpoint_label(),
-                "online_count": overview.online_count,
-                "offline_count": overview.offline_count,
-                "total_count": overview.total_count,
-                "diff_online_prev": diff_online_prev,
-                "drop_alert_threshold": self.AMI_ONLINE_DROP_ALERT_DELTA,
-            },
+            payload=payload,
         )
-        if drop_detected and chat_id is not None:
+        if drop_detected and chat_id is not None and suppression_reason is None:
             await self._notify_ami_alert(
                 trace_id=trace_id,
                 severity="alerta",
-                details=(
-                    "Queda de ramais online detectada\n"
-                    f"Online: {overview.online_count}\n"
-                    f"Offline: {overview.offline_count}\n"
-                    f"Diferenca vs coleta anterior: {diff_online_prev}"
+                details=self._build_ami_drop_details(
+                    online_count=overview.online_count,
+                    offline_count=overview.offline_count,
+                    diff_online_prev=diff_online_prev,
+                    dropped_peers=dropped_peers,
                 ),
             )
 
-    async def _handle_ami_error(self, trace_id: str, error_text: str) -> None:
+    async def _handle_ami_error(
+        self,
+        trace_id: str,
+        error_text: str,
+        *,
+        now_local: datetime | None = None,
+    ) -> None:
         chat_id = self._settings.telegram_allowed_chat_id
+        current_local = now_local or datetime.now(self._tzinfo)
+        suppression_reason = self._get_ami_alert_suppression_reason(current_local)
         signature = error_text.strip().lower() or "unknown"
         changed, previous = self._state_store.compare_and_set_state(
             "proactive:ami:last_error_signature",
             signature,
         )
+        payload = {
+            "transport": self._issabel_provider.transport_name(),
+            "endpoint": self._issabel_provider.endpoint_label(),
+            "error": error_text,
+            "phase": self._detect_ami_phase(error_text),
+        }
+        if suppression_reason is not None:
+            payload["alert_suppressed"] = True
+            payload["suppression_reason"] = suppression_reason
         self._state_store.record_audit_event(
             trace_id=trace_id,
             event_type="ami_probe_tick",
@@ -231,14 +280,11 @@ class ProactiveService:
             username="proactive-service",
             status="error",
             severity="alerta",
-            payload={
-                "transport": self._issabel_provider.transport_name(),
-                "endpoint": self._issabel_provider.endpoint_label(),
-                "error": error_text,
-                "phase": self._detect_ami_phase(error_text),
-            },
+            payload=payload,
         )
         if chat_id is None:
+            return
+        if suppression_reason is not None:
             return
         if previous is not None and not changed:
             return
@@ -433,6 +479,88 @@ class ProactiveService:
         if "connect" in text or "connection" in text or "timeout" in text:
             return "connect"
         return None
+
+    def _get_ami_alert_suppression_reason(
+        self,
+        now_local: datetime,
+    ) -> str | None:
+        if now_local.weekday() == 6:
+            return "sunday"
+        current_time = now_local.timetz().replace(tzinfo=None)
+        if (
+            current_time >= self.AMI_ALERT_QUIET_START
+            or current_time < self.AMI_ALERT_QUIET_END
+        ):
+            return "quiet_hours"
+        return None
+
+    @staticmethod
+    def _build_dropped_peers(
+        *,
+        previous_snapshot: dict | None,
+        current_connected_peers: list[object],
+    ) -> list[dict]:
+        if previous_snapshot is None:
+            return []
+        previous_peers = previous_snapshot.get("connected_peers") or []
+        if not isinstance(previous_peers, list) or not previous_peers:
+            return []
+        current_names = {
+            str(getattr(peer, "name", "")).strip()
+            for peer in current_connected_peers
+            if str(getattr(peer, "name", "")).strip()
+        }
+        dropped: list[dict] = []
+        for peer in previous_peers:
+            if not isinstance(peer, dict):
+                continue
+            name = str(peer.get("name") or "").strip()
+            if not name or name in current_names:
+                continue
+            ip = str(peer.get("ip") or "").strip()
+            port = peer.get("port")
+            last_ip = ip
+            if ip and port not in (None, ""):
+                last_ip = f"{ip}:{port}"
+            dropped.append(
+                {
+                    "name": name,
+                    "last_ip": last_ip or "-",
+                    "status": str(peer.get("status") or "").strip() or None,
+                }
+            )
+        dropped.sort(
+            key=lambda item: (
+                0 if str(item["name"]).isdigit() else 1,
+                int(item["name"]) if str(item["name"]).isdigit() else str(item["name"]),
+            )
+        )
+        return dropped
+
+    @staticmethod
+    def _build_ami_drop_details(
+        *,
+        online_count: int,
+        offline_count: int,
+        diff_online_prev: int | None,
+        dropped_peers: list[dict],
+    ) -> str:
+        lines = [
+            "Queda de ramais online detectada",
+            f"Online: {online_count}",
+            f"Offline: {offline_count}",
+            f"Diferenca vs coleta anterior: {diff_online_prev}",
+        ]
+        if dropped_peers:
+            lines.append("Ramais que sairam do online:")
+            for peer in dropped_peers:
+                line = f"- {peer['name']} | ultimo IP: {peer['last_ip']}"
+                if peer.get("status"):
+                    line += f" | status: {peer['status']}"
+                lines.append(line)
+        else:
+            lines.append("Detalhes dos ramais indisponiveis nesta comparacao.")
+        return "\n".join(lines)
 
     @staticmethod
     def _parse_hhmm(value: str) -> time:

@@ -1325,6 +1325,7 @@ class BotHandlers:
                 captured_at_utc=now_utc,
                 online_count=overview.online_count,
                 offline_count=overview.offline_count,
+                connected_peers=overview.connected_peers,
             )
         return overview, diff_online_24h
 

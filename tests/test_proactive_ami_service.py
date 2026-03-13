@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from src.automations_lib.providers.ami_client import AmiError
+from src.automations_lib.providers.issabel_ami_provider import ConnectedVoipSipPeer
+from src.automations_lib.models import AutomationResult
 from src.config import Settings
 from src.proactive_service import ProactiveService
 from src.state_store import BotStateStore
@@ -29,6 +32,25 @@ class DummyOrchestrator:
     async def run_trigger(self, trigger: str, context):
         del trigger, context
         return []
+
+
+class StableHostOrchestrator:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def run_trigger(self, trigger: str, context):
+        self.calls.append(trigger)
+        del context
+        return [
+            AutomationResult(
+                title="Host Monitoring",
+                message="<b>Host Monitoring</b>\nSaude: OK",
+                source_label="status_host",
+                generated_at=datetime.now(timezone.utc),
+                ok=True,
+                severity="info",
+            )
+        ]
 
 
 @dataclass
@@ -56,6 +78,16 @@ class FakeIssabelProvider:
 
     def endpoint_label(self) -> str:
         return "coalapabx.ddns.net:8088/asterisk/rawman"
+
+
+def peer(
+    name: str,
+    ip: str,
+    *,
+    port: int | None = 5060,
+    status: str | None = "OK",
+) -> ConnectedVoipSipPeer:
+    return ConnectedVoipSipPeer(name=name, ip=ip, port=port, status=status)
 
 
 def build_settings() -> Settings:
@@ -122,8 +154,37 @@ async def test_ami_probe_drop_alerts_once(tmp_path: Path) -> None:
     bot = FakeBot()
     provider = FakeIssabelProvider(
         responses=[
-            FakeOverview(total_count=12, online_count=10, offline_count=2, connected_peers=[]),
-            FakeOverview(total_count=12, online_count=7, offline_count=5, connected_peers=[]),
+            FakeOverview(
+                total_count=12,
+                online_count=10,
+                offline_count=2,
+                connected_peers=[
+                    peer("1001", "10.0.0.1", status="OK (4 ms)"),
+                    peer("1002", "10.0.0.2", status="OK (6 ms)"),
+                    peer("1003", "10.0.0.3", status="OK (7 ms)"),
+                    peer("1004", "10.0.0.4", status="OK (9 ms)"),
+                    peer("1005", "10.0.0.5", status="OK (10 ms)"),
+                    peer("1006", "10.0.0.6", status="OK (11 ms)"),
+                    peer("1007", "10.0.0.7", status="OK (12 ms)"),
+                    peer("1008", "10.0.0.8", status="OK (13 ms)"),
+                    peer("1009", "10.0.0.9", status="OK (14 ms)"),
+                    peer("1010", "10.0.0.10", status="OK (15 ms)"),
+                ],
+            ),
+            FakeOverview(
+                total_count=12,
+                online_count=7,
+                offline_count=5,
+                connected_peers=[
+                    peer("1001", "10.0.0.1", status="OK (4 ms)"),
+                    peer("1002", "10.0.0.2", status="OK (6 ms)"),
+                    peer("1005", "10.0.0.5", status="OK (10 ms)"),
+                    peer("1006", "10.0.0.6", status="OK (11 ms)"),
+                    peer("1007", "10.0.0.7", status="OK (12 ms)"),
+                    peer("1008", "10.0.0.8", status="OK (13 ms)"),
+                    peer("1010", "10.0.0.10", status="OK (15 ms)"),
+                ],
+            ),
         ]
     )
     service = ProactiveService(
@@ -141,9 +202,18 @@ async def test_ami_probe_drop_alerts_once(tmp_path: Path) -> None:
     text = bot.messages[0]["text"]
     assert "Queda de ramais online" in text
     assert "Diferenca vs coleta anterior: -3" in text
+    assert "Ramais que sairam do online:" in text
+    assert "1003 | ultimo IP: 10.0.0.3:5060" in text
+    assert "1004 | ultimo IP: 10.0.0.4:5060" in text
+    assert "1009 | ultimo IP: 10.0.0.9:5060" in text
     events = store.list_audit_events(limit=10)
     latest_tick = next(e for e in events if e["event_type"] == "ami_probe_tick")
     assert latest_tick["severity"] == "alerta"
+    assert latest_tick["payload"]["dropped_peers"] == [
+        {"name": "1003", "last_ip": "10.0.0.3:5060", "status": "OK (7 ms)"},
+        {"name": "1004", "last_ip": "10.0.0.4:5060", "status": "OK (9 ms)"},
+        {"name": "1009", "last_ip": "10.0.0.9:5060", "status": "OK (14 ms)"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -196,3 +266,144 @@ async def test_ami_probe_error_alerts_and_repeated_error_is_deduped(tmp_path: Pa
     events = store.list_audit_events(limit=10)
     latest_tick = next(e for e in events if e["event_type"] == "ami_probe_tick")
     assert latest_tick["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_ami_probe_drop_is_suppressed_during_quiet_hours(tmp_path: Path) -> None:
+    store = BotStateStore(str(tmp_path / "state.db"))
+    bot = FakeBot()
+    provider = FakeIssabelProvider(
+        responses=[
+            FakeOverview(
+                total_count=12,
+                online_count=10,
+                offline_count=2,
+                connected_peers=[peer("1001", "10.0.0.1"), peer("1002", "10.0.0.2"), peer("1003", "10.0.0.3")],
+            ),
+            FakeOverview(
+                total_count=12,
+                online_count=7,
+                offline_count=5,
+                connected_peers=[],
+            ),
+        ]
+    )
+    service = ProactiveService(
+        application=FakeApp(bot),
+        settings=build_settings(),
+        orchestrator=DummyOrchestrator(),
+        state_store=store,
+        issabel_provider=provider,  # type: ignore[arg-type]
+    )
+
+    await service._run_ami_check(
+        "trace-1",
+        now_local=datetime(2026, 2, 27, 17, 50, tzinfo=service._tzinfo),
+    )
+    await service._run_ami_check(
+        "trace-2",
+        now_local=datetime(2026, 2, 27, 18, 10, tzinfo=service._tzinfo),
+    )
+
+    assert bot.messages == []
+    events = store.list_audit_events(limit=10)
+    latest_tick = next(e for e in events if e["event_type"] == "ami_probe_tick")
+    assert latest_tick["payload"]["alert_suppressed"] is True
+    assert latest_tick["payload"]["suppression_reason"] == "quiet_hours"
+    assert latest_tick["payload"]["drop_detected"] is True
+
+
+@pytest.mark.asyncio
+async def test_ami_probe_error_is_suppressed_on_sunday(tmp_path: Path) -> None:
+    store = BotStateStore(str(tmp_path / "state.db"))
+    bot = FakeBot()
+    provider = FakeIssabelProvider(responses=[AmiError("timeout")])
+    service = ProactiveService(
+        application=FakeApp(bot),
+        settings=build_settings(),
+        orchestrator=DummyOrchestrator(),
+        state_store=store,
+        issabel_provider=provider,  # type: ignore[arg-type]
+    )
+
+    await service._run_ami_check(
+        "trace-sunday",
+        now_local=datetime(2026, 3, 1, 10, 0, tzinfo=service._tzinfo),
+    )
+
+    assert bot.messages == []
+    events = store.list_audit_events(limit=10)
+    latest_tick = next(e for e in events if e["event_type"] == "ami_probe_tick")
+    assert latest_tick["status"] == "error"
+    assert latest_tick["payload"]["alert_suppressed"] is True
+    assert latest_tick["payload"]["suppression_reason"] == "sunday"
+
+
+@pytest.mark.asyncio
+async def test_ami_probe_drop_without_previous_peer_details_uses_fallback(
+    tmp_path: Path,
+) -> None:
+    store = BotStateStore(str(tmp_path / "state.db"))
+    now = datetime(2026, 2, 27, 12, 0, tzinfo=timezone.utc)
+    store.record_ami_peer_snapshot(
+        captured_at_utc=now - timedelta(minutes=5),
+        online_count=10,
+        offline_count=2,
+    )
+    store.compare_and_set_state("proactive:ami:online_count", "10")
+    bot = FakeBot()
+    provider = FakeIssabelProvider(
+        responses=[
+            FakeOverview(
+                total_count=12,
+                online_count=7,
+                offline_count=5,
+                connected_peers=[peer("1001", "10.0.0.1")],
+            )
+        ]
+    )
+    service = ProactiveService(
+        application=FakeApp(bot),
+        settings=build_settings(),
+        orchestrator=DummyOrchestrator(),
+        state_store=store,
+        issabel_provider=provider,  # type: ignore[arg-type]
+    )
+
+    await service._run_ami_check(
+        "trace-fallback",
+        now_local=datetime(2026, 2, 27, 12, 5, tzinfo=service._tzinfo),
+    )
+
+    assert len(bot.messages) == 1
+    assert "Detalhes dos ramais indisponiveis nesta comparacao." in bot.messages[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_run_periodic_if_due_with_stable_host_and_ami_does_not_alert(tmp_path: Path) -> None:
+    store = BotStateStore(str(tmp_path / "state.db"))
+    bot = FakeBot()
+    provider = FakeIssabelProvider(
+        responses=[
+            FakeOverview(total_count=12, online_count=10, offline_count=2, connected_peers=[]),
+            FakeOverview(total_count=12, online_count=10, offline_count=2, connected_peers=[]),
+        ]
+    )
+    orchestrator = StableHostOrchestrator()
+    service = ProactiveService(
+        application=FakeApp(bot),
+        settings=build_settings(),
+        orchestrator=orchestrator,  # type: ignore[arg-type]
+        state_store=store,
+        issabel_provider=provider,  # type: ignore[arg-type]
+    )
+
+    await service._run_periodic_if_due(datetime(2026, 2, 27, 10, 0, tzinfo=service._tzinfo))
+    await service._run_periodic_if_due(datetime(2026, 2, 27, 10, 6, tzinfo=service._tzinfo))
+
+    assert bot.messages == []
+    assert orchestrator.calls == ["host", "host"]
+    events = store.list_audit_events(limit=20)
+    ticks = [event for event in events if event["event_type"] == "ami_probe_tick"]
+    assert len(ticks) >= 2
+    assert all(event["status"] == "ok" for event in ticks[:2])

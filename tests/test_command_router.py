@@ -14,6 +14,7 @@ from src.handlers import (
     is_host_command,
     is_status_command,
 )
+from src.automations_lib.providers.ami_client import AmiError
 from src.automations_lib.providers.voip_probe_provider import (
     VoipProbeLogEntry,
     VoipProbeResult,
@@ -243,6 +244,20 @@ class FakeIssabelProvider:
         return "coalapabx.ddns.net:8088/asterisk/rawman"
 
 
+class FakeIssabelProviderRunError(FakeIssabelProvider):
+    def __init__(self) -> None:
+        pass
+
+    async def list_voip_overview(self):
+        raise AmiError("login failed: permission denied")
+
+    def transport_name(self) -> str:
+        return "http_rawman"
+
+    def endpoint_label(self) -> str:
+        return "coalapabx.ddns.net:8088/asterisk/rawman"
+
+
 def build_settings(allowed_chat_id: int | None) -> Settings:
     return Settings(
         telegram_bot_token="token",
@@ -354,6 +369,23 @@ async def test_status_blocks_unauthorized_chat() -> None:
     assert orchestrator.called_triggers == []
     assert len(update.message.replies) == 1
     assert "Acesso nao autorizado" in update.message.replies[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_status_command_runs_trigger_once() -> None:
+    orchestrator = FakeOrchestrator(
+        {"status": [result("m1"), result("m2"), result("m3"), result("m4")]}
+    )
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+    )
+    update = FakeUpdate(text="/status", chat_id=123)
+
+    await handlers.status_handler(update, FakeContext())
+
+    assert orchestrator.called_triggers == ["status"]
+    assert [r["text"] for r in update.message.replies] == ["m1", "m2", "m3", "m4"]
 
 
 @pytest.mark.asyncio
@@ -689,6 +721,40 @@ async def test_all_command_records_voip_error_audit(tmp_path) -> None:
     payload = voip_error.get("payload") or {}
     assert payload.get("stage") == "voip_in_all"
     assert payload.get("rc") == -15
+
+
+@pytest.mark.asyncio
+async def test_all_command_records_ami_error_audit(tmp_path) -> None:
+    orchestrator = FakeOrchestrator(
+        {
+            "status": [result("s1")],
+            "host": [result("h1")],
+        }
+    )
+    store = BotStateStore(str(tmp_path / "state.db"))
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        state_store=store,
+        voip_provider=FakeVoipProvider(),
+        issabel_provider=FakeIssabelProviderRunError(),
+    )
+    update = FakeUpdate(text="/all", chat_id=123)
+
+    await handlers.all_handler(update, FakeContext())
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "Falha no /voips" in combined
+    assert "VoIP Probe" in combined
+    assert any(item["text"].startswith("<b>Lembretes de hoje") for item in update.message.replies)
+    events = store.list_audit_events(limit=50)
+    ami_error = next(
+        item for item in events if str(item.get("event_type")) == "ami_all_error"
+    )
+    payload = ami_error.get("payload") or {}
+    assert payload.get("transport") == "http_rawman"
+    assert payload.get("phase") == "login"
+    assert payload.get("error") == "login failed: permission denied"
 
 
 @pytest.mark.asyncio
