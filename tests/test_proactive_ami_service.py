@@ -138,8 +138,14 @@ async def test_ami_probe_ok_without_drop_does_not_alert(tmp_path: Path) -> None:
         issabel_provider=provider,  # type: ignore[arg-type]
     )
 
-    await service._run_ami_check("trace-1")
-    await service._run_ami_check("trace-2")
+    await service._run_ami_check(
+        "trace-1",
+        now_local=datetime(2026, 2, 27, 12, 0, tzinfo=service._tzinfo),
+    )
+    await service._run_ami_check(
+        "trace-2",
+        now_local=datetime(2026, 2, 27, 12, 5, tzinfo=service._tzinfo),
+    )
 
     assert len(bot.messages) == 0
     events = store.list_audit_events(limit=10)
@@ -195,8 +201,14 @@ async def test_ami_probe_drop_alerts_once(tmp_path: Path) -> None:
         issabel_provider=provider,  # type: ignore[arg-type]
     )
 
-    await service._run_ami_check("trace-1")
-    await service._run_ami_check("trace-2")
+    await service._run_ami_check(
+        "trace-1",
+        now_local=datetime(2026, 2, 27, 12, 0, tzinfo=service._tzinfo),
+    )
+    await service._run_ami_check(
+        "trace-2",
+        now_local=datetime(2026, 2, 27, 12, 5, tzinfo=service._tzinfo),
+    )
 
     assert len(bot.messages) == 1
     text = bot.messages[0]["text"]
@@ -234,8 +246,14 @@ async def test_ami_probe_small_drop_does_not_alert(tmp_path: Path) -> None:
         issabel_provider=provider,  # type: ignore[arg-type]
     )
 
-    await service._run_ami_check("trace-1")
-    await service._run_ami_check("trace-2")
+    await service._run_ami_check(
+        "trace-1",
+        now_local=datetime(2026, 2, 27, 12, 0, tzinfo=service._tzinfo),
+    )
+    await service._run_ami_check(
+        "trace-2",
+        now_local=datetime(2026, 2, 27, 12, 5, tzinfo=service._tzinfo),
+    )
 
     assert len(bot.messages) == 0
     events = store.list_audit_events(limit=10)
@@ -258,8 +276,14 @@ async def test_ami_probe_error_alerts_and_repeated_error_is_deduped(tmp_path: Pa
         issabel_provider=provider,  # type: ignore[arg-type]
     )
 
-    await service._run_ami_check("trace-1")
-    await service._run_ami_check("trace-2")
+    await service._run_ami_check(
+        "trace-1",
+        now_local=datetime(2026, 2, 27, 12, 0, tzinfo=service._tzinfo),
+    )
+    await service._run_ami_check(
+        "trace-2",
+        now_local=datetime(2026, 2, 27, 12, 5, tzinfo=service._tzinfo),
+    )
 
     assert len(bot.messages) == 1
     assert "Falha AMI: timeout" in bot.messages[0]["text"]

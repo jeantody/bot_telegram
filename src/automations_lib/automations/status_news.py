@@ -20,7 +20,7 @@ class StatusNewsAutomation:
         return AutomationResult(
             title="Noticias",
             message=message,
-            source_label="G1 | TecMundo | BoletimSec",
+            source_label="Tecnoblog | BoletimSec | G1 | TecMundo",
             generated_at=context.utc_now().astimezone(timezone.utc),
             ok=True,
         )
@@ -28,12 +28,16 @@ class StatusNewsAutomation:
     def _format_message(self, bundle: NewsBundle) -> str:
         sections = [
             "<b>Noticias</b>",
-            "<i>Top 10 G1\n</i>",
+            "<i>Top 10 Tecnoblog\n</i>",
+            self._to_links(bundle.tecnoblog),
+            "<i>\nTop 10 Mais Populares Tecnoblog\n</i>",
+            self._to_links(bundle.tecnoblog_popular),
+            "<i>\nUltimas 5 BoletimSec\n</i>",
+            self._to_links(bundle.boletimsec),
+            "<i>\nTop 10 G1\n</i>",
             self._to_links(bundle.g1),
             "<i>\nTop 10 TecMundo\n</i>",
             self._to_links(bundle.tecmundo),
-            "<i>\nUltimas 5 BoletimSec</i>\n",
-            self._to_links(bundle.boletimsec),
         ]
         return "\n".join(sections)
 
@@ -45,4 +49,3 @@ class StatusNewsAutomation:
             link = html.escape(item.link, quote=True)
             lines.append(f"{idx}. <a href=\"{link}\">{title}</a>")
         return "\n".join(lines) if lines else "Sem itens no momento."
-
