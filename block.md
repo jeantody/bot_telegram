@@ -3,6 +3,8 @@
 # Adicione abaixo uma palavra ou frase por linha para ocultar noticias
 # no primeiro bloco "Noticias" do /status.
 VÍDEOS:
+VÍDEO:
+Vídeos do g1
 filmes e séries em alta
 filme com
 e mais com desconto

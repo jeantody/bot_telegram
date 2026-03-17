@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import asyncio
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 import html
 import logging
 from pathlib import Path
+from time import struct_time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bs4 import BeautifulSoup
 import feedparser
@@ -20,12 +24,15 @@ DEFAULT_BLOCKLIST_PATH = ROOT_DIR / "block.md"
 class NewsItem:
     title: str
     link: str
+    published_at: datetime | None = None
 
 
 @dataclass(frozen=True)
 class NewsBundle:
     tecnoblog: list[NewsItem]
     tecnoblog_popular: list[NewsItem]
+    hackread_today: list[NewsItem]
+    hackread_yesterday: list[NewsItem]
     boletimsec: list[NewsItem]
     g1: list[NewsItem]
     tecmundo: list[NewsItem]
@@ -34,26 +41,45 @@ class NewsBundle:
 class NewsProvider:
     TECNOBLOG_FEED = "https://tecnoblog.net/noticias/feed/"
     TECNOBLOG_HOME = "https://tecnoblog.net/"
+    HACKREAD_FEED = "https://hackread.com/feed/"
     G1_FEED = "https://g1.globo.com/rss/g1/"
     TECMUNDO_FEED = "https://rss.tecmundo.com.br/feed"
     BOLETIMSEC_FEED = "https://boletimsec.com/feed/"
+    BROWSER_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
 
     def __init__(
         self,
         timeout_seconds: int,
         blocklist_path: str | Path | None = None,
+        translator=None,
     ) -> None:
         self._timeout_seconds = timeout_seconds
         self._blocklist_path = (
             Path(blocklist_path) if blocklist_path is not None else DEFAULT_BLOCKLIST_PATH
         )
+        self._translator = translator
+        self._translation_cache: dict[str, str] = {}
 
-    async def fetch_news(self) -> NewsBundle:
+    async def fetch_news(self, *, timezone_name: str = "America/Sao_Paulo") -> NewsBundle:
         blocked_terms = self.load_blocked_terms(self._blocklist_path)
-        async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+        self._translation_cache = {}
+        async with httpx.AsyncClient(
+            timeout=self._timeout_seconds,
+            headers=self.BROWSER_HEADERS,
+            follow_redirects=True,
+        ) as client:
             responses = await asyncio.gather(
                 client.get(self.TECNOBLOG_FEED),
                 client.get(self.TECNOBLOG_HOME),
+                client.get(self.HACKREAD_FEED),
                 client.get(self.BOLETIMSEC_FEED),
                 client.get(self.G1_FEED),
                 client.get(self.TECMUNDO_FEED),
@@ -64,16 +90,20 @@ class NewsProvider:
             responses[0],
             url=self.TECNOBLOG_FEED,
         )
-        boletimsec_response = self._require_response(
+        hackread_feed_response = self._require_response(
             responses[2],
+            url=self.HACKREAD_FEED,
+        )
+        boletimsec_response = self._require_response(
+            responses[3],
             url=self.BOLETIMSEC_FEED,
         )
         g1_response = self._require_response(
-            responses[3],
+            responses[4],
             url=self.G1_FEED,
         )
         tecmundo_response = self._require_response(
-            responses[4],
+            responses[5],
             url=self.TECMUNDO_FEED,
         )
 
@@ -85,6 +115,17 @@ class NewsProvider:
         tecnoblog_popular_items = self._parse_tecnoblog_popular_response(
             responses[1],
             blocked_terms=blocked_terms,
+        )
+        hackread_items = self.parse_feed_items(
+            hackread_feed_response.text,
+            limit=None,
+        )
+        hackread_today_items, hackread_yesterday_items = (
+            await self._translate_and_filter_hackread_items(
+                hackread_items,
+                blocked_terms=blocked_terms,
+                timezone_name=timezone_name,
+            )
         )
         boletimsec_items = self.parse_feed_items(
             boletimsec_response.text,
@@ -104,6 +145,8 @@ class NewsProvider:
         return NewsBundle(
             tecnoblog=tecnoblog_items,
             tecnoblog_popular=tecnoblog_popular_items,
+            hackread_today=hackread_today_items,
+            hackread_yesterday=hackread_yesterday_items,
             boletimsec=boletimsec_items,
             g1=g1_items,
             tecmundo=tecmundo_items,
@@ -144,7 +187,7 @@ class NewsProvider:
     @staticmethod
     def parse_feed_items(
         feed_xml: str,
-        limit: int,
+        limit: int | None,
         blocked_terms: tuple[str, ...] | None = None,
     ) -> list[NewsItem]:
         parsed = feedparser.parse(feed_xml)
@@ -156,8 +199,14 @@ class NewsProvider:
                 continue
             if NewsProvider._is_blocked_title(title, blocked_terms or ()):
                 continue
-            items.append(NewsItem(title=title, link=link))
-            if len(items) >= limit:
+            items.append(
+                NewsItem(
+                    title=title,
+                    link=link,
+                    published_at=NewsProvider._extract_published_at(entry),
+                )
+            )
+            if limit is not None and len(items) >= limit:
                 break
         return items
 
@@ -194,6 +243,113 @@ class NewsProvider:
             if items:
                 return items
         return items
+
+    async def _translate_and_filter_hackread_items(
+        self,
+        items: list[NewsItem],
+        *,
+        blocked_terms: tuple[str, ...],
+        timezone_name: str,
+    ) -> tuple[list[NewsItem], list[NewsItem]]:
+        tzinfo = self._resolve_timezone(timezone_name)
+        today = self._now_in_timezone(tzinfo).date()
+        yesterday = today - timedelta(days=1)
+        today_items: list[NewsItem] = []
+        yesterday_items: list[NewsItem] = []
+
+        for item in items:
+            if item.published_at is None:
+                continue
+            published_local = item.published_at.astimezone(tzinfo).date()
+            if published_local not in {today, yesterday}:
+                continue
+            translated_title = await self._translate_text(item.title)
+            if self._is_blocked_title(item.title, blocked_terms):
+                continue
+            if self._is_blocked_title(translated_title, blocked_terms):
+                continue
+            translated_item = NewsItem(
+                title=translated_title,
+                link=item.link,
+                published_at=item.published_at,
+            )
+            if published_local == today:
+                today_items.append(translated_item)
+            else:
+                yesterday_items.append(translated_item)
+
+        return today_items, yesterday_items
+
+    async def _translate_text(self, text: str) -> str:
+        normalized = text.strip()
+        if not normalized:
+            return text
+        cached = self._translation_cache.get(normalized)
+        if cached is not None:
+            return cached
+
+        translator = self._get_translator()
+        if translator is None:
+            self._translation_cache[normalized] = text
+            return text
+
+        try:
+            translated = await asyncio.to_thread(
+                translator.translate,
+                normalized,
+                dest="pt",
+            )
+            if asyncio.iscoroutine(translated):
+                translated = await translated
+            translated_text = (getattr(translated, "text", "") or "").strip() or text
+        except Exception:
+            translated_text = text
+
+        self._translation_cache[normalized] = translated_text
+        return translated_text
+
+    def _get_translator(self):
+        if self._translator is not None:
+            return self._translator
+        try:
+            from googletrans import Translator
+        except Exception:
+            return None
+        self._translator = Translator()
+        return self._translator
+
+    @staticmethod
+    def _extract_published_at(entry) -> datetime | None:
+        for attr_name in ("published", "updated"):
+            raw_value = getattr(entry, attr_name, "")
+            if raw_value:
+                try:
+                    published = parsedate_to_datetime(raw_value)
+                except (TypeError, ValueError, IndexError):
+                    published = None
+                if published is not None:
+                    if published.tzinfo is None:
+                        published = published.replace(tzinfo=timezone.utc)
+                    return published.astimezone(timezone.utc)
+
+        for attr_name in ("published_parsed", "updated_parsed"):
+            raw_value = getattr(entry, attr_name, None)
+            if isinstance(raw_value, struct_time):
+                return datetime(*raw_value[:6], tzinfo=timezone.utc)
+        return None
+
+    @staticmethod
+    def _resolve_timezone(timezone_name: str) -> timezone | ZoneInfo:
+        try:
+            return ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError:
+            if timezone_name == "America/Sao_Paulo":
+                return timezone(timedelta(hours=-3))
+            return timezone.utc
+
+    @staticmethod
+    def _now_in_timezone(tzinfo: timezone | ZoneInfo) -> datetime:
+        return datetime.now(tzinfo)
 
     @staticmethod
     def _is_blocked_title(title: str, blocked_terms: tuple[str, ...]) -> bool:

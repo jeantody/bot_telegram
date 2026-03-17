@@ -149,6 +149,7 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("ping", bot_handlers.ping_handler))
     application.add_handler(CommandHandler("ssl", bot_handlers.ssl_handler))
     application.add_handler(CommandHandler("voips", bot_handlers.voips_handler))
+    application.add_handler(CommandHandler("net", bot_handlers.net_handler))
     application.add_handler(CommandHandler("voip", bot_handlers.voip_handler))
     application.add_handler(CommandHandler("call", bot_handlers.call_handler))
     application.add_handler(CommandHandler("voip_logs", bot_handlers.voip_logs_handler))

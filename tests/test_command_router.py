@@ -233,8 +233,10 @@ class FakeAmiOverview:
 class FakeIssabelProvider:
     def __init__(self, overview: FakeAmiOverview) -> None:
         self._overview = overview
+        self.calls = 0
 
     async def list_voip_overview(self):
+        self.calls += 1
         return self._overview
 
     def transport_name(self) -> str:
@@ -246,10 +248,32 @@ class FakeIssabelProvider:
 
 class FakeIssabelProviderRunError(FakeIssabelProvider):
     def __init__(self) -> None:
-        pass
+        self.calls = 0
 
     async def list_voip_overview(self):
+        self.calls += 1
         raise AmiError("login failed: permission denied")
+
+    def transport_name(self) -> str:
+        return "http_rawman"
+
+    def endpoint_label(self) -> str:
+        return "coalapabx.ddns.net:8088/asterisk/rawman"
+
+
+class FakeIssabelProviderSequence:
+    def __init__(self, responses: list[FakeAmiOverview | Exception]) -> None:
+        self._responses = list(responses)
+        self.calls = 0
+
+    async def list_voip_overview(self):
+        self.calls += 1
+        if not self._responses:
+            raise RuntimeError("no more fake AMI responses")
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
     def transport_name(self) -> str:
         return "http_rawman"
@@ -339,6 +363,7 @@ async def test_help_command_includes_voips() -> None:
 
     combined = "\n".join(item["text"] for item in update.message.replies)
     assert "/voips" in combined
+    assert "/net" in combined
     assert "/call" in combined
 
 
@@ -408,21 +433,22 @@ async def test_all_command_runs_status_then_host() -> None:
             "host": [result("h1")],
         }
     )
+    issabel_provider = FakeIssabelProvider(
+        FakeAmiOverview(
+            total_count=3,
+            online_count=2,
+            offline_count=1,
+            connected_peers=[
+                FakeAmiPeer(name="1101", ip="10.0.0.1", port=5060, status="OK (12 ms)"),
+                FakeAmiPeer(name="1102", ip="10.0.0.2", port=5061, status="OK (8 ms)"),
+            ],
+        )
+    )
     handlers = BotHandlers(
         settings=build_settings(allowed_chat_id=123),
         orchestrator=orchestrator,
         voip_provider=FakeVoipProvider(),
-        issabel_provider=FakeIssabelProvider(
-            FakeAmiOverview(
-                total_count=3,
-                online_count=2,
-                offline_count=1,
-                connected_peers=[
-                    FakeAmiPeer(name="1101", ip="10.0.0.1", port=5060, status="OK"),
-                    FakeAmiPeer(name="1102", ip="10.0.0.2", port=5061, status="OK"),
-                ],
-            )
-        ),
+        issabel_provider=issabel_provider,
     )
     update = FakeUpdate(text="/all", chat_id=123)
 
@@ -438,10 +464,13 @@ async def test_all_command_runs_status_then_host() -> None:
     ]
     combined = "\n".join(item["text"] for item in update.message.replies)
     assert "VoIPs conectados (SIP)" in combined
+    assert "Net Unidades (AMI)" in combined
     assert "Total ramais: <b>3</b>" in combined
+    assert "Unidade 1: <b>ONLINE</b> | ramal ativo 1101 | ip 10.0.0.1 (12 ms)" in combined
     assert "VoIP Probe" in combined
     assert any(item["text"].startswith("<b>Lembretes de hoje") for item in update.message.replies)
     assert any(item["text"].startswith("<b>Lembretes de amanha") for item in update.message.replies)
+    assert issabel_provider.calls == 2
 
 
 @pytest.mark.asyncio
@@ -473,6 +502,88 @@ async def test_voip_command_runs_probe_and_replies() -> None:
     assert "Destino" in combined
     assert "Matriz" in combined
     assert "Resumo" in combined
+
+
+@pytest.mark.asyncio
+async def test_net_command_lists_units_from_ami() -> None:
+    orchestrator = FakeOrchestrator({})
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        issabel_provider=FakeIssabelProvider(
+            FakeAmiOverview(
+                total_count=4,
+                online_count=3,
+                offline_count=1,
+                connected_peers=[
+                    FakeAmiPeer(name="1102", ip="10.0.0.2", port=5060, status="OK (2 ms)"),
+                    FakeAmiPeer(name="3333", ip="10.0.0.3", port=5060, status="OK (5 ms)"),
+                    FakeAmiPeer(name="2510", ip="10.0.0.4", port=5060, status="OK (4 ms)"),
+                ],
+            )
+        ),
+    )
+    update = FakeUpdate(text="/net", chat_id=123)
+
+    await handlers.net_handler(update, FakeContext())
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "Net Unidades (AMI)" in combined
+    assert "Online: <b>5/13</b>" in combined
+    assert "Offline: <b>8/13</b>" in combined
+    assert "Alfaro: <b>ONLINE</b> | ramal ativo 2510 | ip 10.0.0.4 (4 ms)" in combined
+    assert "Unidade 1: <b>ONLINE</b> | ramal ativo 1102 | ip 10.0.0.2 (2 ms)" in combined
+    assert "Unidade 2: <b>ONLINE</b> | ramal ativo 3333 | ip 10.0.0.3 (5 ms)" in combined
+    assert "Escolinha: <b>ONLINE</b> | ramal ativo 1102 | ip 10.0.0.2 (2 ms)" in combined
+    assert "Collis1: <b>ONLINE</b> | ramal ativo 3333 | ip 10.0.0.3 (5 ms)" in combined
+    assert "Unidade 3: <b>OFFLINE</b> | verificados: 1301, 1302" in combined
+
+
+@pytest.mark.asyncio
+async def test_net_command_keeps_unit_online_when_ami_status_has_no_latency() -> None:
+    orchestrator = FakeOrchestrator({})
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        issabel_provider=FakeIssabelProvider(
+            FakeAmiOverview(
+                total_count=1,
+                online_count=1,
+                offline_count=0,
+                connected_peers=[
+                    FakeAmiPeer(name="1102", ip="10.0.0.2", port=5060, status="OK"),
+                ],
+            )
+        ),
+    )
+    update = FakeUpdate(text="/net", chat_id=123)
+
+    await handlers.net_handler(update, FakeContext())
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "Unidade 1: <b>ONLINE</b> | ramal ativo 1102 | ip 10.0.0.2 | latencia indisponivel" in combined
+
+
+@pytest.mark.asyncio
+async def test_net_command_blocks_unauthorized_chat() -> None:
+    orchestrator = FakeOrchestrator({})
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        issabel_provider=FakeIssabelProvider(
+            FakeAmiOverview(
+                total_count=0,
+                online_count=0,
+                offline_count=0,
+                connected_peers=[],
+            )
+        ),
+    )
+    update = FakeUpdate(text="/net", chat_id=999)
+
+    await handlers.net_handler(update, FakeContext())
+
+    assert any("Acesso nao autorizado" in item["text"] for item in update.message.replies)
 
 
 @pytest.mark.asyncio
@@ -745,16 +856,60 @@ async def test_all_command_records_ami_error_audit(tmp_path) -> None:
 
     combined = "\n".join(item["text"] for item in update.message.replies)
     assert "Falha no /voips" in combined
+    assert "Falha no /net" in combined
     assert "VoIP Probe" in combined
     assert any(item["text"].startswith("<b>Lembretes de hoje") for item in update.message.replies)
     events = store.list_audit_events(limit=50)
-    ami_error = next(
-        item for item in events if str(item.get("event_type")) == "ami_all_error"
+    ami_voips_error = next(
+        item for item in events if str(item.get("event_type")) == "ami_all_voips_error"
     )
-    payload = ami_error.get("payload") or {}
+    payload = ami_voips_error.get("payload") or {}
     assert payload.get("transport") == "http_rawman"
     assert payload.get("phase") == "login"
     assert payload.get("error") == "login failed: permission denied"
+    ami_net_error = next(
+        item for item in events if str(item.get("event_type")) == "ami_all_net_error"
+    )
+    net_payload = ami_net_error.get("payload") or {}
+    assert net_payload.get("transport") == "http_rawman"
+    assert net_payload.get("phase") == "login"
+    assert net_payload.get("error") == "login failed: permission denied"
+
+
+@pytest.mark.asyncio
+async def test_all_command_keeps_voips_when_second_ami_call_for_net_fails() -> None:
+    orchestrator = FakeOrchestrator(
+        {
+            "status": [result("s1")],
+            "host": [result("h1")],
+        }
+    )
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        voip_provider=FakeVoipProvider(),
+        issabel_provider=FakeIssabelProviderSequence(
+            [
+                FakeAmiOverview(
+                    total_count=1,
+                    online_count=1,
+                    offline_count=0,
+                    connected_peers=[
+                        FakeAmiPeer(name="1101", ip="10.0.0.1", port=5060, status="OK (12 ms)"),
+                    ],
+                ),
+                AmiError("login failed: permission denied"),
+            ]
+        ),
+    )
+    update = FakeUpdate(text="/all", chat_id=123)
+
+    await handlers.all_handler(update, FakeContext())
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "VoIPs conectados (SIP)" in combined
+    assert "Total ramais: <b>1</b>" in combined
+    assert "Falha no /net: login failed: permission denied" in combined
 
 
 @pytest.mark.asyncio

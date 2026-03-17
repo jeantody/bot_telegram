@@ -125,6 +125,7 @@ class FakeBotHandlers:
         self.ping_handler = self._callback("ping")
         self.ssl_handler = self._callback("ssl")
         self.voips_handler = self._callback("voips")
+        self.net_handler = self._callback("net")
         self.voip_handler = self._callback("voip")
         self.call_handler = self._callback("call")
         self.voip_logs_handler = self._callback("voip_logs")
@@ -233,6 +234,7 @@ def test_build_application_registers_handlers_and_services(monkeypatch) -> None:
         "ping",
         "ssl",
         "voips",
+        "net",
         "voip",
         "call",
         "voip_logs",

@@ -17,6 +17,7 @@ from src.automations_lib.orchestrator import StatusOrchestrator
 from src.automations_lib.providers.ami_client import AmiError
 from src.automations_lib.providers.cep_provider import CepProvider
 from src.automations_lib.providers.issabel_ami_provider import IssabelAmiProvider
+from src.automations_lib.providers.net_units_provider import evaluate_net_units
 from src.automations_lib.providers.network_diagnostics_provider import (
     NetworkDiagnosticsProvider,
 )
@@ -138,7 +139,7 @@ class BotHandlers:
             return
         await update.message.reply_text(
             "Bot online. Use /status, /host, /health, /whois, /cep, /ping, /ssl, "
-            "/voips, /voip, /call, /voip_logs, /note, /lembrete, /logs ou /all."
+            "/voips, /net, /voip, /call, /voip_logs, /note, /lembrete, /logs ou /all."
         )
 
     async def help_handler(
@@ -149,7 +150,7 @@ class BotHandlers:
             return
         await update.message.reply_text(
             "Comandos: /start, /help, status, /status, /host, /health, /whois, "
-            "/cep, /ping, /ssl, /voips, /voip, /call, /voip_logs, /note, /lembrete, /logs, /all"
+            "/cep, /ping, /ssl, /voips, /net, /voip, /call, /voip_logs, /note, /lembrete, /logs, /all"
         )
 
     async def status_handler(
@@ -453,7 +454,7 @@ class BotHandlers:
             payload={"transport": ami_transport, "endpoint": ami_endpoint},
         )
         try:
-            overview, diff_online_24h = await self._resolve_voips_overview()
+            overview, diff_online_24h = await self._resolve_ami_overview()
             lines = self._build_voips_lines(
                 trace_id=trace_id,
                 overview=overview,
@@ -566,6 +567,152 @@ class BotHandlers:
                 status="error",
                 severity="alerta",
                 payload={"error": str(exc)},
+            )
+
+    async def net_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        del context
+        prepared = await self._prepare_command(update, command="/net")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command="/net",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload=None,
+        )
+        ami_transport = self._issabel_provider.transport_name()
+        ami_endpoint = self._issabel_provider.endpoint_label()
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="ami_query_start",
+            command="/net",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload={"transport": ami_transport, "endpoint": ami_endpoint},
+        )
+        try:
+            overview, _ = await self._resolve_ami_overview()
+            net_overview = evaluate_net_units(overview.connected_peers)
+            await self._reply_chunks(
+                message,
+                "\n".join(
+                    self._build_net_lines(
+                        trace_id=trace_id,
+                        net_overview=net_overview,
+                        include_trace=True,
+                    )
+                ),
+            )
+            payload = {
+                "transport": ami_transport,
+                "online_units": net_overview.online_count,
+                "offline_units": net_overview.offline_count,
+                "total_units": net_overview.total_count,
+                "latency_unavailable_units": self._count_latency_unavailable_units(
+                    net_overview
+                ),
+            }
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="ami_query_end",
+                command="/net",
+                context=automation_context,
+                status="ok",
+                severity="info",
+                payload=payload,
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/net",
+                context=automation_context,
+                status="ok",
+                severity="info",
+                payload=payload,
+            )
+        except ValueError:
+            await message.reply_text(
+                "ISSABEL AMI nao configurado. Configure "
+                "ISSABEL_AMI_RAWMAN_URL ou ISSABEL_AMI_HOST + usuario/secret."
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="ami_query_end",
+                command="/net",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "transport": ami_transport,
+                    "error": "not_configured",
+                    "phase": "connect",
+                },
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/net",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": "not_configured"},
+            )
+        except AmiError as exc:
+            error_text = str(exc)
+            await message.reply_text(f"Falha no /net: {error_text}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="ami_query_end",
+                command="/net",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "transport": ami_transport,
+                    "error": error_text,
+                    "phase": self._detect_ami_phase(error_text),
+                },
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/net",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": error_text},
+            )
+        except Exception as exc:
+            error_text = str(exc)
+            await message.reply_text(f"Falha no /net: {error_text}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="ami_query_end",
+                command="/net",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "transport": ami_transport,
+                    "error": error_text,
+                    "phase": self._detect_ami_phase(error_text),
+                },
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/net",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": error_text},
             )
 
     async def voip_handler(
@@ -1074,7 +1221,7 @@ class BotHandlers:
                 item
                 for item in events
                 if str(item.get("event_type") or "").startswith("ami_")
-                or str(item.get("command") or "") == "/voips"
+                or str(item.get("command") or "") in {"/voips", "/net"}
             ][:limit]
         if only_voip:
             events = [
@@ -1144,6 +1291,11 @@ class BotHandlers:
         await self._execute_trigger(message, automation_context, "status")
         await self._execute_trigger(message, automation_context, "host")
         await self._execute_voips_in_all(
+            message,
+            trace_id=trace_id,
+            automation_context=automation_context,
+        )
+        await self._execute_net_in_all(
             message,
             trace_id=trace_id,
             automation_context=automation_context,
@@ -1221,17 +1373,17 @@ class BotHandlers:
         ami_transport = self._issabel_provider.transport_name()
         ami_endpoint = self._issabel_provider.endpoint_label()
         try:
-            overview, diff_online_24h = await self._resolve_voips_overview()
-            lines = self._build_voips_lines(
+            overview, diff_online_24h = await self._resolve_ami_overview()
+            voips_lines = self._build_voips_lines(
                 trace_id=trace_id,
                 overview=overview,
                 diff_online_24h=diff_online_24h,
                 include_trace=True,
             )
-            await self._reply_chunks(message, "\n".join(lines))
+            await self._reply_chunks(message, "\n".join(voips_lines))
             self._record_audit(
                 trace_id=trace_id,
-                event_type="ami_all_ok",
+                event_type="ami_all_voips_ok",
                 command="/all",
                 context=automation_context,
                 status="ok",
@@ -1254,7 +1406,7 @@ class BotHandlers:
             )
             self._record_audit(
                 trace_id=trace_id,
-                event_type="ami_all_error",
+                event_type="ami_all_voips_error",
                 command="/all",
                 context=automation_context,
                 status="error",
@@ -1275,7 +1427,7 @@ class BotHandlers:
             )
             self._record_audit(
                 trace_id=trace_id,
-                event_type="ami_all_error",
+                event_type="ami_all_voips_error",
                 command="/all",
                 context=automation_context,
                 status="error",
@@ -1296,7 +1448,7 @@ class BotHandlers:
             )
             self._record_audit(
                 trace_id=trace_id,
-                event_type="ami_all_error",
+                event_type="ami_all_voips_error",
                 command="/all",
                 context=automation_context,
                 status="error",
@@ -1309,7 +1461,86 @@ class BotHandlers:
                 },
             )
 
-    async def _resolve_voips_overview(self):
+    async def _execute_net_in_all(
+        self,
+        message: Message,
+        *,
+        trace_id: str,
+        automation_context: AutomationContext,
+    ) -> None:
+        ami_transport = self._issabel_provider.transport_name()
+        ami_endpoint = self._issabel_provider.endpoint_label()
+        try:
+            overview, _ = await self._resolve_ami_overview()
+            net_overview = evaluate_net_units(overview.connected_peers)
+            net_lines = self._build_net_lines(
+                trace_id=trace_id,
+                net_overview=net_overview,
+                include_trace=True,
+            )
+            await self._reply_chunks(message, "\n".join(net_lines))
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="ami_all_net_ok",
+                command="/all",
+                context=automation_context,
+                status="ok",
+                severity="info",
+                payload={
+                    "transport": ami_transport,
+                    "endpoint": ami_endpoint,
+                    "net_online_units": net_overview.online_count,
+                    "net_offline_units": net_overview.offline_count,
+                    "net_total_units": net_overview.total_count,
+                    "latency_unavailable_units": self._count_latency_unavailable_units(
+                        net_overview
+                    ),
+                },
+            )
+        except ValueError:
+            error_text = "ISSABEL AMI nao configurado"
+            await self._reply_chunks(
+                message,
+                "<b>Net Unidades (AMI)</b>\n"
+                f"Falha no /net: {html.escape(error_text)}",
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="ami_all_net_error",
+                command="/all",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "transport": ami_transport,
+                    "endpoint": ami_endpoint,
+                    "error": error_text,
+                    "phase": "connect",
+                },
+            )
+        except Exception as exc:
+            error_text = str(exc)
+            await self._reply_chunks(
+                message,
+                "<b>Net Unidades (AMI)</b>\n"
+                f"Falha no /net: {html.escape(error_text)}",
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="ami_all_net_error",
+                command="/all",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "transport": ami_transport,
+                    "endpoint": ami_endpoint,
+                    "error": error_text,
+                    "phase": self._detect_ami_phase(error_text),
+                },
+            )
+
+    async def _resolve_ami_overview(self):
         overview = await self._issabel_provider.list_voip_overview()
         diff_online_24h: int | None = None
         if self._state_store is not None:
@@ -1328,6 +1559,60 @@ class BotHandlers:
                 connected_peers=overview.connected_peers,
             )
         return overview, diff_online_24h
+
+    @staticmethod
+    def _build_net_lines(
+        *,
+        trace_id: str,
+        net_overview,
+        include_trace: bool,
+    ) -> list[str]:
+        lines = ["<b>Net Unidades (AMI)</b>"]
+        if include_trace:
+            lines.append(f"Trace: <code>{html.escape(trace_id)}</code>")
+        lines.extend(
+            [
+                f"Online: <b>{net_overview.online_count}/{net_overview.total_count}</b>",
+                f"Offline: <b>{net_overview.offline_count}/{net_overview.total_count}</b>",
+            ]
+        )
+        for unit in net_overview.units:
+            if unit.online and unit.active_extension:
+                active_ip = str(unit.active_ip or "").strip()
+                active_ip_label = active_ip or "indisponivel"
+                latency_ms = _extract_ami_latency_ms(unit.active_status)
+                latency_label = (
+                    f"{latency_ms} ms" if latency_ms is not None else "indisponivel"
+                )
+                ip_segment = (
+                    f"ip {html.escape(active_ip_label)} ({html.escape(latency_label)})"
+                    if latency_ms is not None
+                    else f"ip {html.escape(active_ip_label)} | latencia indisponivel"
+                )
+                lines.append(
+                    f"- {html.escape(unit.name)}: <b>ONLINE</b> | "
+                    f"ramal ativo {html.escape(unit.active_extension)} | "
+                    f"{ip_segment}"
+                )
+            else:
+                checked = ", ".join(unit.checked_extensions) if unit.checked_extensions else "-"
+                lines.append(
+                    f"- {html.escape(unit.name)}: <b>OFFLINE</b> | "
+                    f"verificados: {html.escape(checked)}"
+                )
+        return lines
+
+    @staticmethod
+    def _count_latency_unavailable_units(
+        net_overview,
+    ) -> int:
+        unavailable = 0
+        for unit in net_overview.units:
+            if not unit.online:
+                continue
+            if _extract_ami_latency_ms(unit.active_status) is None:
+                unavailable += 1
+        return unavailable
 
     @staticmethod
     def _build_voips_lines(
@@ -1858,4 +2143,17 @@ def _format_datetime(value: datetime | None, tzinfo) -> str:
     if value is None:
         return "indisponivel"
     return value.astimezone(tzinfo).strftime("%d/%m/%Y %H:%M")
+
+
+def _extract_ami_latency_ms(status_text: str | None) -> int | None:
+    normalized = str(status_text or "").strip()
+    if not normalized:
+        return None
+    match = re.search(r"\((\d+)\s*ms\)", normalized, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
 

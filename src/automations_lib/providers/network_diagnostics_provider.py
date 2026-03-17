@@ -57,6 +57,10 @@ class NetworkDiagnosticsProvider:
         )
         return NetworkDiagnostics(host=host, ping=ping_result, traceroute=trace_result)
 
+    async def ping(self, raw_host: str) -> PingResult:
+        host = self._normalize_host(raw_host)
+        return await self._run_ping(host)
+
     def _normalize_host(self, raw_host: str) -> str:
         host = (raw_host or "").strip()
         host = host.split("/", maxsplit=1)[0]

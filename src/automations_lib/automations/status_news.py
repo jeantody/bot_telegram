@@ -15,12 +15,14 @@ class StatusNewsAutomation:
         self._provider = provider
 
     async def run(self, context: AutomationContext) -> AutomationResult:
-        bundle = await self._provider.fetch_news()
+        bundle = await self._provider.fetch_news(
+            timezone_name=context.settings.bot_timezone
+        )
         message = self._format_message(bundle)
         return AutomationResult(
             title="Noticias",
             message=message,
-            source_label="Tecnoblog | BoletimSec | G1 | TecMundo",
+            source_label="Tecnoblog | Hackread | BoletimSec | G1 | TecMundo",
             generated_at=context.utc_now().astimezone(timezone.utc),
             ok=True,
         )
@@ -32,6 +34,10 @@ class StatusNewsAutomation:
             self._to_links(bundle.tecnoblog),
             "<i>\nTop 10 Mais Populares Tecnoblog\n</i>",
             self._to_links(bundle.tecnoblog_popular),
+            "<i>\nHackread Hoje\n</i>",
+            self._to_links(bundle.hackread_today),
+            "<i>\nHackread Ontem\n</i>",
+            self._to_links(bundle.hackread_yesterday),
             "<i>\nUltimas 5 BoletimSec\n</i>",
             self._to_links(bundle.boletimsec),
             "<i>\nTop 10 G1\n</i>",
