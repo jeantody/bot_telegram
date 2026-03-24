@@ -9,7 +9,13 @@ from src import telegram_app
 from src.config import Settings
 
 
-def build_settings(*, voip_call_timeout_seconds: int = 30) -> Settings:
+def build_settings(
+    *,
+    voip_call_timeout_seconds: int = 30,
+    zabbix_base_url: str | None = None,
+    zabbix_api_token: str | None = None,
+    zabbix_timeout_seconds: int = 8,
+) -> Settings:
     return Settings(
         telegram_bot_token="token-123",
         telegram_allowed_chat_id=123,
@@ -39,6 +45,9 @@ def build_settings(*, voip_call_timeout_seconds: int = 30) -> Settings:
         hostinger_status_page_url="https://statuspage.hostinger.com/",
         host_report_timezone="America/Sao_Paulo",
         voip_call_timeout_seconds=voip_call_timeout_seconds,
+        zabbix_base_url=zabbix_base_url,
+        zabbix_api_token=zabbix_api_token,
+        zabbix_timeout_seconds=zabbix_timeout_seconds,
     )
 
 
@@ -126,6 +135,7 @@ class FakeBotHandlers:
         self.ssl_handler = self._callback("ssl")
         self.voips_handler = self._callback("voips")
         self.net_handler = self._callback("net")
+        self.zabbixh_handler = self._callback("zabbixh")
         self.voip_handler = self._callback("voip")
         self.call_handler = self._callback("call")
         self.voip_logs_handler = self._callback("voip_logs")
@@ -162,6 +172,13 @@ class FakeProvider:
         self.kwargs = kwargs
 
 
+class FakeZabbixProvider:
+    def __init__(self, *, base_url: str, api_token: str, timeout_seconds: int) -> None:
+        self.base_url = base_url
+        self.api_token = api_token
+        self.timeout_seconds = timeout_seconds
+
+
 class FakeAutomation:
     def __init__(self, provider: object) -> None:
         self.provider = provider
@@ -173,7 +190,12 @@ class LifecycleApplication:
 
 
 def test_build_application_registers_handlers_and_services(monkeypatch) -> None:
-    settings = build_settings(voip_call_timeout_seconds=11)
+    settings = build_settings(
+        voip_call_timeout_seconds=11,
+        zabbix_base_url="https://aurora.acctunnel.space/zabbix",
+        zabbix_api_token="zbx-token",
+        zabbix_timeout_seconds=12,
+    )
     application = FakeApplication()
     builder = FakeBuilder(application)
     created: dict[str, object] = {}
@@ -190,6 +212,7 @@ def test_build_application_registers_handlers_and_services(monkeypatch) -> None:
     monkeypatch.setattr(telegram_app, "FinanceProvider", FakeProvider)
     monkeypatch.setattr(telegram_app, "HealthProvider", FakeProvider)
     monkeypatch.setattr(telegram_app, "HostStatusProvider", FakeProvider)
+    monkeypatch.setattr(telegram_app, "ZabbixProvider", FakeZabbixProvider)
     monkeypatch.setattr(telegram_app, "StatusNewsAutomation", FakeAutomation)
     monkeypatch.setattr(telegram_app, "StatusWeatherAutomation", FakeAutomation)
     monkeypatch.setattr(telegram_app, "StatusTrendsAutomation", FakeAutomation)
@@ -235,6 +258,7 @@ def test_build_application_registers_handlers_and_services(monkeypatch) -> None:
         "ssl",
         "voips",
         "net",
+        "zabbixh",
         "voip",
         "call",
         "voip_logs",
@@ -251,6 +275,7 @@ def test_build_application_registers_handlers_and_services(monkeypatch) -> None:
     assert "proactive_service" in application.bot_data
     assert "reminder_service" in application.bot_data
     assert "voip_probe_service" in application.bot_data
+    assert "zabbix_provider" in application.bot_data
 
     state_store = application.bot_data["state_store"]
     assert isinstance(state_store, FakeStateStore)
@@ -266,8 +291,46 @@ def test_build_application_registers_handlers_and_services(monkeypatch) -> None:
     voip_provider = application.bot_data["voip_probe_service"].kwargs["provider"]
     assert isinstance(voip_provider, FakeVoipProbeProvider)
     assert voip_provider.timeout_seconds == 97
+    zabbix_provider = application.bot_data["zabbix_provider"]
+    assert isinstance(zabbix_provider, FakeZabbixProvider)
+    assert zabbix_provider.base_url == "https://aurora.acctunnel.space/zabbix"
+    assert zabbix_provider.api_token == "zbx-token"
+    assert zabbix_provider.timeout_seconds == 12
     assert FakeBotHandlers.last_instance.kwargs["state_store"] is state_store
     assert FakeBotHandlers.last_instance.kwargs["voip_provider"] is voip_provider
+
+
+def test_build_application_skips_zabbix_provider_when_not_configured(monkeypatch) -> None:
+    settings = build_settings()
+    application = FakeApplication()
+    builder = FakeBuilder(application)
+
+    monkeypatch.setattr(telegram_app, "ApplicationBuilder", lambda: builder)
+    monkeypatch.setattr(telegram_app, "BotStateStore", FakeStateStore)
+    monkeypatch.setattr(telegram_app, "AutomationRegistry", FakeRegistry)
+    monkeypatch.setattr(telegram_app, "StatusOrchestrator", FakeStatusOrchestrator)
+    monkeypatch.setattr(telegram_app, "VoipProbeProvider", FakeVoipProbeProvider)
+    monkeypatch.setattr(telegram_app, "BotHandlers", FakeBotHandlers)
+    monkeypatch.setattr(telegram_app, "NewsProvider", FakeProvider)
+    monkeypatch.setattr(telegram_app, "WeatherProvider", FakeProvider)
+    monkeypatch.setattr(telegram_app, "TrendsProvider", FakeProvider)
+    monkeypatch.setattr(telegram_app, "FinanceProvider", FakeProvider)
+    monkeypatch.setattr(telegram_app, "HealthProvider", FakeProvider)
+    monkeypatch.setattr(telegram_app, "HostStatusProvider", FakeProvider)
+    monkeypatch.setattr(telegram_app, "ZabbixProvider", FakeZabbixProvider)
+    monkeypatch.setattr(telegram_app, "StatusNewsAutomation", FakeAutomation)
+    monkeypatch.setattr(telegram_app, "StatusWeatherAutomation", FakeAutomation)
+    monkeypatch.setattr(telegram_app, "StatusTrendsAutomation", FakeAutomation)
+    monkeypatch.setattr(telegram_app, "StatusFinanceAutomation", FakeAutomation)
+    monkeypatch.setattr(telegram_app, "StatusHealthAutomation", FakeAutomation)
+    monkeypatch.setattr(telegram_app, "StatusHostAutomation", FakeAutomation)
+    monkeypatch.setattr(telegram_app, "ProactiveService", lambda **kwargs: FakeService(**kwargs))
+    monkeypatch.setattr(telegram_app, "ReminderService", lambda **kwargs: FakeService(**kwargs))
+    monkeypatch.setattr(telegram_app, "VoipProbeService", lambda **kwargs: FakeService(**kwargs))
+
+    telegram_app.build_application(settings)
+
+    assert "zabbix_provider" not in application.bot_data
 
 
 @pytest.mark.asyncio

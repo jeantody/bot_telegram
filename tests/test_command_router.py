@@ -19,6 +19,10 @@ from src.automations_lib.providers.voip_probe_provider import (
     VoipProbeLogEntry,
     VoipProbeResult,
 )
+from src.automations_lib.providers.zabbix_provider import (
+    ZabbixHostMetricsSnapshot,
+    ZabbixMetricValue,
+)
 from src.state_store import BotStateStore
 
 
@@ -282,6 +286,22 @@ class FakeIssabelProviderSequence:
         return "coalapabx.ddns.net:8088/asterisk/rawman"
 
 
+class FakeZabbixProvider:
+    def __init__(self, snapshots: list[ZabbixHostMetricsSnapshot]) -> None:
+        self._snapshots = snapshots
+        self.calls = 0
+
+    async def fetch_host_metrics(self, host_targets):
+        self.calls += 1
+        return self._snapshots
+
+
+class FakeZabbixProviderRunError:
+    async def fetch_host_metrics(self, host_targets):
+        del host_targets
+        raise RuntimeError("zabbix api unavailable")
+
+
 def build_settings(allowed_chat_id: int | None) -> Settings:
     return Settings(
         telegram_bot_token="token",
@@ -311,6 +331,15 @@ def build_settings(allowed_chat_id: int | None) -> Settings:
         hostinger_incidents_url="https://statuspage.hostinger.com/api/v2/incidents.json",
         hostinger_status_page_url="https://statuspage.hostinger.com/",
         host_report_timezone="America/Sao_Paulo",
+        zabbix_base_url="https://aurora.acctunnel.space/zabbix",
+        zabbix_api_token="zbx-token",
+        zabbixh_host_targets=(
+            ("01_TrueNas", "10679"),
+            ("09_ACCBServer", "10645"),
+            ("12_TOKYO-3", "10677"),
+            ("13_Painel_De_Senhas", "10676"),
+            ("Ubuntu_Hostinger", "10756"),
+        ),
     )
 
 
@@ -364,7 +393,130 @@ async def test_help_command_includes_voips() -> None:
     combined = "\n".join(item["text"] for item in update.message.replies)
     assert "/voips" in combined
     assert "/net" in combined
+    assert "/zabbixh" in combined
     assert "/call" in combined
+
+
+def _metric(metric_key: str, label: str, value: str | None, *, found: bool = True) -> ZabbixMetricValue:
+    return ZabbixMetricValue(
+        metric_key=metric_key,
+        label=label,
+        found=found,
+        value=value,
+        units="%",
+        item_name=label,
+        item_key=metric_key,
+    )
+
+
+@pytest.mark.asyncio
+async def test_zabbixh_command_formats_hosts_metrics_and_missing_items() -> None:
+    orchestrator = FakeOrchestrator({})
+    snapshots = [
+        ZabbixHostMetricsSnapshot(
+            hostid="10679",
+            label="01_TrueNas",
+            host_name="01_TrueNas",
+            unavailable=False,
+            interface_available=1,
+            metrics={
+                "cpu": _metric("cpu", "CPU", "8"),
+                "memory": _metric("memory", "Memoria", "70.99874464066627"),
+                "uptime": _metric("uptime", "Uptime", "7876041"),
+                "disk_root_used_pct": _metric(
+                    "disk_root_used_pct",
+                    "Disco /",
+                    "sda: 12.4% | sdb: 21.7% | sdc: 33.2%",
+                ),
+            },
+        ),
+        ZabbixHostMetricsSnapshot(
+            hostid="10645",
+            label="09_ACCBServer",
+            host_name="09_ACCBServer",
+            unavailable=True,
+            interface_available=2,
+            metrics={
+                "cpu": _metric("cpu", "CPU", "0"),
+                "memory": _metric("memory", "Memoria", "0"),
+                "uptime": _metric("uptime", "Uptime", "0"),
+                "disk_root_used_pct": _metric(
+                    "disk_root_used_pct",
+                    "Disco /",
+                    "C: 68.69% | D: 58.9% | E: 11.2%",
+                ),
+            },
+        ),
+    ]
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        zabbix_provider=FakeZabbixProvider(snapshots),  # type: ignore[arg-type]
+    )
+    update = FakeUpdate(text="/zabbixh", chat_id=123)
+
+    await handlers.zabbixh_handler(update, FakeContext())
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "Zabbix Hosts" in combined
+    assert "<b>01_TrueNas</b>" in combined
+    assert "CPU: 8%" in combined
+    assert "Memoria: 71%" in combined
+    assert "Uptime: 91d 3h 47m" in combined
+    assert "Disco /: sda: 12.4% | sdb: 21.7% | sdc: 33.2%" in combined
+    assert "<b>09_ACCBServer</b>" in combined
+    assert "Status host: <b>INDISPONIVEL</b>" in combined
+    assert "CPU: 0%" in combined
+    assert "Uptime: 0s" in combined
+    assert "Disco /: C: 68.69% | D: 58.9% | E: 11.2%" in combined
+
+
+@pytest.mark.asyncio
+async def test_zabbixh_command_reports_when_no_hosts_are_configured() -> None:
+    orchestrator = FakeOrchestrator({})
+    settings = Settings(**{**build_settings(allowed_chat_id=123).__dict__, "zabbixh_host_targets": ()})
+    handlers = BotHandlers(
+        settings=settings,
+        orchestrator=orchestrator,
+        zabbix_provider=FakeZabbixProvider([]),  # type: ignore[arg-type]
+    )
+    update = FakeUpdate(text="/zabbixh", chat_id=123)
+
+    await handlers.zabbixh_handler(update, FakeContext())
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "Nenhum host configurado em ZABBIXH_HOST_TARGETS_JSON." in combined
+
+
+@pytest.mark.asyncio
+async def test_zabbixh_command_blocks_unauthorized_chat() -> None:
+    orchestrator = FakeOrchestrator({})
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        zabbix_provider=FakeZabbixProvider([]),  # type: ignore[arg-type]
+    )
+    update = FakeUpdate(text="/zabbixh", chat_id=999)
+
+    await handlers.zabbixh_handler(update, FakeContext())
+
+    assert any("Acesso nao autorizado" in item["text"] for item in update.message.replies)
+
+
+@pytest.mark.asyncio
+async def test_zabbixh_command_reports_provider_error() -> None:
+    orchestrator = FakeOrchestrator({})
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        zabbix_provider=FakeZabbixProviderRunError(),  # type: ignore[arg-type]
+    )
+    update = FakeUpdate(text="/zabbixh", chat_id=123)
+
+    await handlers.zabbixh_handler(update, FakeContext())
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "Falha no /zabbixh: zabbix api unavailable" in combined
 
 
 @pytest.mark.asyncio
@@ -444,25 +596,45 @@ async def test_all_command_runs_status_then_host() -> None:
             ],
         )
     )
+    zabbix_provider = FakeZabbixProvider(
+        [
+            ZabbixHostMetricsSnapshot(
+                hostid="10679",
+                label="01_TrueNas",
+                host_name="01_TrueNas",
+                unavailable=False,
+                interface_available=1,
+                metrics={
+                    "cpu": _metric("cpu", "CPU", "8"),
+                    "memory": _metric("memory", "Memoria", "70.99874464066627"),
+                    "uptime": _metric("uptime", "Uptime", "7876041"),
+                    "disk_root_used_pct": _metric("disk_root_used_pct", "Disco /", "91"),
+                },
+            )
+        ]
+    )
     handlers = BotHandlers(
         settings=build_settings(allowed_chat_id=123),
         orchestrator=orchestrator,
         voip_provider=FakeVoipProvider(),
         issabel_provider=issabel_provider,
+        zabbix_provider=zabbix_provider,  # type: ignore[arg-type]
     )
     update = FakeUpdate(text="/all", chat_id=123)
 
     await handlers.all_handler(update, FakeContext())
 
     assert orchestrator.called_triggers == ["status", "host"]
-    assert [r["text"] for r in update.message.replies[:5]] == [
+    assert [r["text"] for r in update.message.replies[:6]] == [
         "s1",
         "s2",
         "s3",
         "s4",
+        "<b>Zabbix Hosts</b>\n\n<b>01_TrueNas</b>\nStatus host: <b>OK</b>\nCPU: 8%\nMemoria: 71%\nUptime: 91d 3h 47m\nDisco /: 91%",
         "h1",
     ]
     combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "Zabbix Hosts" in combined
     assert "VoIPs conectados (SIP)" in combined
     assert "Net Unidades (AMI)" in combined
     assert "Total ramais: <b>3</b>" in combined
@@ -471,6 +643,156 @@ async def test_all_command_runs_status_then_host() -> None:
     assert any(item["text"].startswith("<b>Lembretes de hoje") for item in update.message.replies)
     assert any(item["text"].startswith("<b>Lembretes de amanha") for item in update.message.replies)
     assert issabel_provider.calls == 2
+    assert zabbix_provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_all_command_reports_zabbix_error_and_continues() -> None:
+    orchestrator = FakeOrchestrator(
+        {
+            "status": [result("s1")],
+            "host": [result("h1")],
+        }
+    )
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        voip_provider=FakeVoipProvider(),
+        issabel_provider=FakeIssabelProvider(
+            FakeAmiOverview(
+                total_count=1,
+                online_count=1,
+                offline_count=0,
+                connected_peers=[
+                    FakeAmiPeer(name="1101", ip="10.0.0.1", port=5060, status="OK (12 ms)"),
+                ],
+            )
+        ),
+        zabbix_provider=FakeZabbixProviderRunError(),  # type: ignore[arg-type]
+    )
+    update = FakeUpdate(text="/all", chat_id=123)
+
+    await handlers.all_handler(update, FakeContext())
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "Falha no /zabbixh: zabbix api unavailable" in combined
+    assert "h1" in combined
+    assert "VoIPs conectados (SIP)" in combined
+    assert "Net Unidades (AMI)" in combined
+    assert "VoIP Probe" in combined
+    assert any(item["text"].startswith("<b>Lembretes de hoje") for item in update.message.replies)
+
+
+@pytest.mark.asyncio
+async def test_all_command_reports_when_zabbix_has_no_hosts_and_continues() -> None:
+    orchestrator = FakeOrchestrator(
+        {
+            "status": [result("s1")],
+            "host": [result("h1")],
+        }
+    )
+    settings = Settings(
+        **{**build_settings(allowed_chat_id=123).__dict__, "zabbixh_host_targets": ()}
+    )
+    handlers = BotHandlers(
+        settings=settings,
+        orchestrator=orchestrator,
+        voip_provider=FakeVoipProvider(),
+        issabel_provider=FakeIssabelProvider(
+            FakeAmiOverview(
+                total_count=1,
+                online_count=1,
+                offline_count=0,
+                connected_peers=[
+                    FakeAmiPeer(name="1101", ip="10.0.0.1", port=5060, status="OK (12 ms)"),
+                ],
+            )
+        ),
+        zabbix_provider=FakeZabbixProvider([]),  # type: ignore[arg-type]
+    )
+    update = FakeUpdate(text="/all", chat_id=123)
+
+    await handlers.all_handler(update, FakeContext())
+
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "Falha no /zabbixh: Nenhum host configurado em ZABBIXH_HOST_TARGETS_JSON." in combined
+    assert "h1" in combined
+    assert "VoIPs conectados (SIP)" in combined
+
+
+@pytest.mark.asyncio
+async def test_all_command_records_zabbix_error_audit(tmp_path) -> None:
+    orchestrator = FakeOrchestrator(
+        {
+            "status": [result("s1")],
+            "host": [result("h1")],
+        }
+    )
+    store = BotStateStore(str(tmp_path / "state.db"))
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        state_store=store,
+        voip_provider=FakeVoipProvider(),
+        zabbix_provider=FakeZabbixProviderRunError(),  # type: ignore[arg-type]
+    )
+    update = FakeUpdate(text="/all", chat_id=123)
+
+    await handlers.all_handler(update, FakeContext())
+
+    events = store.list_audit_events(limit=50)
+    zabbix_error = next(
+        item for item in events if str(item.get("event_type")) == "zabbix_all_error"
+    )
+    payload = zabbix_error.get("payload") or {}
+    assert payload.get("stage") == "zabbixh_in_all"
+    assert payload.get("error") == "zabbix api unavailable"
+
+
+@pytest.mark.asyncio
+async def test_all_command_records_zabbix_ok_audit(tmp_path) -> None:
+    orchestrator = FakeOrchestrator(
+        {
+            "status": [result("s1")],
+            "host": [result("h1")],
+        }
+    )
+    store = BotStateStore(str(tmp_path / "state.db"))
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        state_store=store,
+        voip_provider=FakeVoipProvider(),
+        zabbix_provider=FakeZabbixProvider(
+            [
+                ZabbixHostMetricsSnapshot(
+                    hostid="10679",
+                    label="01_TrueNas",
+                    host_name="01_TrueNas",
+                    unavailable=True,
+                    interface_available=2,
+                    metrics={
+                        "cpu": _metric("cpu", "CPU", "8"),
+                        "memory": _metric("memory", "Memoria", "70"),
+                        "uptime": _metric("uptime", "Uptime", "7876041"),
+                        "disk_root_used_pct": _metric("disk_root_used_pct", "Disco /", None, found=False),
+                    },
+                )
+            ]
+        ),  # type: ignore[arg-type]
+    )
+    update = FakeUpdate(text="/all", chat_id=123)
+
+    await handlers.all_handler(update, FakeContext())
+
+    events = store.list_audit_events(limit=50)
+    zabbix_ok = next(
+        item for item in events if str(item.get("event_type")) == "zabbix_all_ok"
+    )
+    payload = zabbix_ok.get("payload") or {}
+    assert payload.get("stage") == "zabbixh_in_all"
+    assert payload.get("host_count") == 1
+    assert payload.get("unavailable_count") == 1
 
 
 @pytest.mark.asyncio
@@ -499,9 +821,12 @@ async def test_voip_command_runs_probe_and_replies() -> None:
 
     combined = "\n".join(item["text"] for item in update.message.replies)
     assert "VoIP Probe" in combined
-    assert "Destino" in combined
-    assert "Matriz" in combined
+    assert "Destino: <b>1102/11999990000</b>" in combined
+    assert "Latencia: 850 ms" in combined
+    assert "Logs" in combined
     assert "Resumo" in combined
+    assert "Chamada completada" not in combined
+    assert "Sem problemas" not in combined
 
 
 @pytest.mark.asyncio
@@ -602,6 +927,10 @@ async def test_call_command_runs_single_probe_and_replies() -> None:
     assert "VoIP Call Test" in combined
     assert "Destino: <b>1102</b>" in combined
     assert "Status: <b>WARN</b>" in combined
+    assert "Latencia: 620 ms" in combined
+    assert "Logs" in combined
+    assert "Chamada completada" not in combined
+    assert "Sem problemas" not in combined
     assert "183 indica progresso SIP" in combined
 
 

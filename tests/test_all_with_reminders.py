@@ -129,6 +129,7 @@ async def test_all_includes_today_and_tomorrow_reminders(tmp_path) -> None:
 
     replies = [item["text"] for item in update.message.replies]
     assert replies[0] == "s1"
-    assert replies[1] == "h1"
+    assert replies[1] == "<b>Zabbix Hosts</b>\nFalha no /zabbixh: Zabbix nao configurado."
+    assert replies[2] == "h1"
     assert any(line.startswith("<b>Lembretes de hoje (") for line in replies)
     assert any(line.startswith("<b>Lembretes de amanha (") for line in replies)

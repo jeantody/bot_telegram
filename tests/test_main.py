@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src import main as app_main
 
 
@@ -32,9 +34,15 @@ def test_main_bootstrap_calls_dependencies_in_order(monkeypatch) -> None:
         calls.append("build_application")
         return application
 
-    monkeypatch.setattr(app_main, "load_settings", fake_load_settings)
-    monkeypatch.setattr(app_main, "configure_logging", fake_configure_logging)
-    monkeypatch.setattr(app_main, "build_application", fake_build_application)
+    monkeypatch.setattr(
+        app_main,
+        "_import_runtime_components",
+        lambda: (
+            fake_load_settings,
+            fake_configure_logging,
+            fake_build_application,
+        ),
+    )
 
     app_main.main()
 
@@ -44,3 +52,16 @@ def test_main_bootstrap_calls_dependencies_in_order(monkeypatch) -> None:
         "build_application",
         "run_polling",
     ]
+
+
+def test_main_reports_missing_runtime_dependency(monkeypatch) -> None:
+    monkeypatch.setattr(
+        app_main,
+        "_import_runtime_components",
+        lambda: (_ for _ in ()).throw(
+            SystemExit(app_main._runtime_dependency_error("dotenv"))
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="Missing Python dependency 'dotenv'"):
+        app_main.main()

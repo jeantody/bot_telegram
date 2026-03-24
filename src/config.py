@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
+from src.env_contract import resolve_project_path, validate_env_contract
+
 
 @dataclass(frozen=True)
 class AlertPriorityRule:
@@ -92,6 +94,10 @@ class Settings:
     issabel_ami_rawman_url: str | None = None
     rate_limit_voip_seconds: int = 120
     rate_limit_ping_seconds: int = 20
+    zabbix_base_url: str | None = None
+    zabbix_api_token: str | None = None
+    zabbix_timeout_seconds: int = 8
+    zabbixh_host_targets: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
 
 def _read_int(name: str, default: int) -> int:
@@ -179,6 +185,41 @@ def _read_note_tab_chat_ids(name: str) -> tuple[tuple[str, int], ...]:
     return tuple(sorted(pairs, key=lambda item: item[0]))
 
 
+def _read_zabbix_host_targets(name: str) -> tuple[tuple[str, str], ...]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return ()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid {name}: expected JSON list with host targets."
+        ) from exc
+    if not isinstance(payload, list):
+        raise ValueError(f"Invalid {name}: expected a JSON list.")
+
+    normalized: list[tuple[str, str]] = []
+    for item in payload:
+        if isinstance(item, list) and len(item) == 2:
+            label_raw, hostid_raw = item
+        elif isinstance(item, dict):
+            label_raw = item.get("label")
+            hostid_raw = item.get("hostid")
+        else:
+            raise ValueError(
+                f"Invalid {name}: each item must be [label, hostid] or "
+                '{"label":"...","hostid":"..."}'
+            )
+        label = str(label_raw or "").strip()
+        hostid = str(hostid_raw or "").strip()
+        if not label or not hostid:
+            raise ValueError(
+                f"Invalid {name}: label and hostid are required for every item."
+            )
+        normalized.append((label, hostid))
+    return tuple(normalized)
+
+
 def _normalize_peer_name_regex(pattern: str) -> str:
     raw = (pattern or "").strip()
     if not raw:
@@ -206,6 +247,16 @@ def _normalize_rawman_url(raw_url: str | None) -> tuple[str | None, int | None]:
     query = f"?{parsed.query}" if parsed.query else ""
     normalized = f"{scheme}://{host}:{port}{path}{query}"
     return normalized, port
+
+
+def _read_project_path(name: str, default: str) -> str:
+    raw = os.getenv(name, default).strip() or default
+    return str(resolve_project_path(raw))
+
+
+def _read_optional_text(name: str) -> str | None:
+    raw = os.getenv(name, "").strip()
+    return raw or None
 
 
 def _default_priority_rules() -> tuple[AlertPriorityRule, ...]:
@@ -269,13 +320,38 @@ def _read_priority_rules(name: str) -> tuple[AlertPriorityRule, ...]:
     return tuple(rules)
 
 
+def _validate_zabbix_config(
+    *,
+    base_url: str | None,
+    api_token: str | None,
+) -> None:
+    configured = {
+        "ZABBIX_BASE_URL": base_url,
+        "ZABBIX_API_TOKEN": api_token,
+    }
+    present = [key for key, value in configured.items() if value]
+    if present and len(present) != len(configured):
+        missing = [key for key, value in configured.items() if not value]
+        raise ValueError(
+            "Incomplete Zabbix configuration. "
+            f"Missing: {', '.join(missing)}."
+        )
+
+
 def load_settings() -> Settings:
+    validate_env_contract()
     # Ensure local .env values win over stale shell/system environment values.
-    load_dotenv(override=True)
+    load_dotenv(dotenv_path=resolve_project_path(".env"), override=True)
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         raise ValueError("Missing TELEGRAM_BOT_TOKEN in environment.")
+    zabbix_base_url = _read_optional_text("ZABBIX_BASE_URL")
+    zabbix_api_token = _read_optional_text("ZABBIX_API_TOKEN")
+    _validate_zabbix_config(
+        base_url=zabbix_base_url,
+        api_token=zabbix_api_token,
+    )
     rawman_url, rawman_port = _normalize_rawman_url(
         os.getenv("ISSABEL_AMI_RAWMAN_URL", "").strip() or None
     )
@@ -382,7 +458,7 @@ def load_settings() -> Settings:
         ),
         reminder_send_retry_limit=_read_int("REMINDER_SEND_RETRY_LIMIT", 3),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
-        state_db_path=os.getenv("STATE_DB_PATH", "data/bot_state.db").strip(),
+        state_db_path=_read_project_path("STATE_DB_PATH", "data/bot_state.db"),
         proactive_enabled=_read_bool("PROACTIVE_ENABLED", True),
         proactive_check_interval_seconds=_read_int(
             "PROACTIVE_CHECK_INTERVAL_SECONDS", 300
@@ -411,9 +487,9 @@ def load_settings() -> Settings:
         voip_call_timeout_seconds=_read_int("VOIP_CALL_TIMEOUT_SECONDS", 30),
         voip_probe_interval_seconds=_read_int("VOIP_PROBE_INTERVAL_SECONDS", 3600),
         voip_latency_alert_ms=_read_int("VOIP_LATENCY_ALERT_MS", 1500),
-        voip_results_db_path=os.getenv(
+        voip_results_db_path=_read_project_path(
             "VOIP_RESULTS_DB_PATH", "data/voip_probe.db"
-        ).strip(),
+        ),
         voip_alert_chat_id=_read_optional_int("VOIP_ALERT_CHAT_ID"),
         issabel_ami_host=os.getenv("ISSABEL_AMI_HOST", "").strip() or None,
         issabel_ami_port=ami_port,
@@ -427,4 +503,8 @@ def load_settings() -> Settings:
         issabel_ami_rawman_url=rawman_url,
         rate_limit_voip_seconds=_read_int("RATE_LIMIT_VOIP_SECONDS", 120),
         rate_limit_ping_seconds=_read_int("RATE_LIMIT_PING_SECONDS", 20),
+        zabbix_base_url=zabbix_base_url,
+        zabbix_api_token=zabbix_api_token,
+        zabbix_timeout_seconds=_read_int("ZABBIX_TIMEOUT_SECONDS", 8),
+        zabbixh_host_targets=_read_zabbix_host_targets("ZABBIXH_HOST_TARGETS_JSON"),
     )

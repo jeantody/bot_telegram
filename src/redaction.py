@@ -21,12 +21,16 @@ _GENERIC_KV_RE = re.compile(
 _GENERIC_COLON_RE = re.compile(
     r"(?i)\b(token|password|secret|api_key)\s*:\s*([^\s]+)"
 )
+_AUTH_BEARER_RE = re.compile(
+    r"(?i)\b(authorization)\s*:\s*bearer\s+([A-Za-z0-9._\-~+/=]+)"
+)
 
 
 def redact_text(text: str) -> str:
     if not text:
         return text
     value = _TELEGRAM_BOT_TOKEN_URL_RE.sub(r"\1<redacted>", text)
+    value = _AUTH_BEARER_RE.sub(r"\1: Bearer <redacted>", value)
     value = _GENERIC_KV_RE.sub(r"\1=<redacted>", value)
     value = _GENERIC_COLON_RE.sub(r"\1: <redacted>", value)
     return value
@@ -51,4 +55,3 @@ def redact_payload(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [redact_payload(item) for item in obj]
     return obj
-

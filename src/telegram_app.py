@@ -17,6 +17,7 @@ from src.automations_lib.providers.news_provider import NewsProvider
 from src.automations_lib.providers.trends_provider import TrendsProvider
 from src.automations_lib.providers.voip_probe_provider import VoipProbeProvider
 from src.automations_lib.providers.weather_provider import WeatherProvider
+from src.automations_lib.providers.zabbix_provider import ZabbixProvider
 from src.automations_lib.registry import AutomationRegistry
 from src.config import Settings
 from src.handlers import BotHandlers
@@ -103,11 +104,19 @@ def build_application(settings: Settings) -> Application:
     voip_provider = VoipProbeProvider(
         timeout_seconds=voip_timeout_seconds
     )
+    zabbix_provider = None
+    if settings.zabbix_base_url and settings.zabbix_api_token:
+        zabbix_provider = ZabbixProvider(
+            base_url=settings.zabbix_base_url,
+            api_token=settings.zabbix_api_token,
+            timeout_seconds=settings.zabbix_timeout_seconds,
+        )
     bot_handlers = BotHandlers(
         settings=settings,
         orchestrator=orchestrator,
         state_store=state_store,
         voip_provider=voip_provider,
+        zabbix_provider=zabbix_provider,
     )
     builder = (
         ApplicationBuilder()
@@ -137,6 +146,8 @@ def build_application(settings: Settings) -> Application:
     application.bot_data["reminder_service"] = reminder_service
     application.bot_data["voip_probe_service"] = voip_probe_service
     application.bot_data["state_store"] = state_store
+    if zabbix_provider is not None:
+        application.bot_data["zabbix_provider"] = zabbix_provider
 
     application.add_handler(CommandHandler("start", bot_handlers.start_handler))
     application.add_handler(CommandHandler("help", bot_handlers.help_handler))
@@ -150,6 +161,7 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("ssl", bot_handlers.ssl_handler))
     application.add_handler(CommandHandler("voips", bot_handlers.voips_handler))
     application.add_handler(CommandHandler("net", bot_handlers.net_handler))
+    application.add_handler(CommandHandler("zabbixh", bot_handlers.zabbixh_handler))
     application.add_handler(CommandHandler("voip", bot_handlers.voip_handler))
     application.add_handler(CommandHandler("call", bot_handlers.call_handler))
     application.add_handler(CommandHandler("voip_logs", bot_handlers.voip_logs_handler))

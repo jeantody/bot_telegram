@@ -26,6 +26,11 @@ from src.automations_lib.providers.voip_probe_provider import (
     VoipProbeProvider,
 )
 from src.automations_lib.providers.whois_provider import WhoisProvider
+from src.automations_lib.providers.zabbix_provider import (
+    ZabbixHostMetricsSnapshot,
+    ZabbixHostTarget,
+    ZabbixProvider,
+)
 from src.config import Settings
 from src.message_utils import split_message
 from src.state_store import BotStateStore
@@ -87,6 +92,7 @@ class BotHandlers:
         ssl_provider: SslProvider | None = None,
         voip_provider: VoipProbeProvider | None = None,
         issabel_provider: IssabelAmiProvider | None = None,
+        zabbix_provider: ZabbixProvider | None = None,
     ) -> None:
         self._settings = settings
         self._orchestrator = orchestrator
@@ -128,6 +134,21 @@ class BotHandlers:
             use_tls=settings.issabel_ami_use_tls,
             peer_name_regex=settings.issabel_ami_peer_name_regex,
         )
+        self._zabbix_provider = zabbix_provider
+        if (
+            self._zabbix_provider is None
+            and settings.zabbix_base_url
+            and settings.zabbix_api_token
+        ):
+            self._zabbix_provider = ZabbixProvider(
+                base_url=settings.zabbix_base_url,
+                api_token=settings.zabbix_api_token,
+                timeout_seconds=settings.zabbix_timeout_seconds,
+            )
+        self._zabbixh_targets = tuple(
+            ZabbixHostTarget(hostid=hostid, label=label)
+            for label, hostid in settings.zabbixh_host_targets
+        )
         self._note_tab_map = {key: value for key, value in settings.note_tab_chat_ids}
         self._tzinfo = _resolve_timezone(settings.bot_timezone)
 
@@ -139,7 +160,7 @@ class BotHandlers:
             return
         await update.message.reply_text(
             "Bot online. Use /status, /host, /health, /whois, /cep, /ping, /ssl, "
-            "/voips, /net, /voip, /call, /voip_logs, /note, /lembrete, /logs ou /all."
+            "/voips, /net, /zabbixh, /voip, /call, /voip_logs, /note, /lembrete, /logs ou /all."
         )
 
     async def help_handler(
@@ -150,7 +171,7 @@ class BotHandlers:
             return
         await update.message.reply_text(
             "Comandos: /start, /help, status, /status, /host, /health, /whois, "
-            "/cep, /ping, /ssl, /voips, /net, /voip, /call, /voip_logs, /note, /lembrete, /logs, /all"
+            "/cep, /ping, /ssl, /voips, /net, /zabbixh, /voip, /call, /voip_logs, /note, /lembrete, /logs, /all"
         )
 
     async def status_handler(
@@ -715,6 +736,78 @@ class BotHandlers:
                 payload={"error": error_text},
             )
 
+    async def zabbixh_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        del context
+        prepared = await self._prepare_command(update, command="/zabbixh")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command="/zabbixh",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload={"hostids": [item.hostid for item in self._zabbixh_targets]},
+        )
+        if self._zabbix_provider is None:
+            await message.reply_text("Zabbix nao configurado.")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/zabbixh",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": "not_configured"},
+            )
+            return
+        if not self._zabbixh_targets:
+            await message.reply_text(
+                "Nenhum host configurado em ZABBIXH_HOST_TARGETS_JSON."
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/zabbixh",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": "no_targets_configured"},
+            )
+            return
+        try:
+            snapshots = await self._zabbix_provider.fetch_host_metrics(
+                self._zabbixh_targets
+            )
+            await self._reply_chunks(message, self._build_zabbixh_message(snapshots))
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/zabbixh",
+                context=automation_context,
+                status="ok",
+                severity="info",
+                payload={
+                    "host_count": len(snapshots),
+                    "unavailable_count": sum(1 for item in snapshots if item.unavailable),
+                },
+            )
+        except Exception as exc:
+            await message.reply_text(f"Falha no /zabbixh: {exc}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/zabbixh",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"error": str(exc)},
+            )
+
     async def voip_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -875,14 +968,12 @@ class BotHandlers:
         finished = _format_datetime(_parse_iso_datetime(result.finished_at_utc), self._tzinfo)
         lines = [
             title,
-            f"Destino: <b>{html.escape(result.target_number)}</b>",
+            f"Destino: <b>{html.escape(self._build_voip_destinations_label(result))}</b>",
             f"Status: <b>{status_label or ('OK' if result.ok else 'FALHA')}</b>",
-            f"Chamada completada: {'sim' if result.completed_call else 'nao'}",
-            f"Sem problemas: {'sim' if result.no_issues else 'nao'}",
             (
-                f"Latencia setup: {result.setup_latency_ms} ms"
+                f"Latencia: {result.setup_latency_ms} ms"
                 if result.setup_latency_ms is not None
-                else "Latencia setup: indisponivel"
+                else "Latencia: indisponivel"
             ),
             f"Duracao total: {result.total_duration_ms} ms",
             (
@@ -902,6 +993,70 @@ class BotHandlers:
         if failure_human:
             lines.append(f"Falha: {html.escape(failure_human)}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_voip_destinations_label(result) -> str:
+        destinations = result.destinations if isinstance(result.destinations, list) else []
+        selected_numbers: list[str] = []
+        for expected_key in ("target", "external"):
+            for item in destinations:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("key") or "") != expected_key:
+                    continue
+                number = str(item.get("number") or "").strip()
+                if not number or number in selected_numbers:
+                    continue
+                selected_numbers.append(number)
+        if selected_numbers:
+            return "/".join(selected_numbers)
+        fallback = str(result.target_number or "").strip()
+        return fallback or "-"
+
+    def _build_zabbixh_message(
+        self,
+        snapshots: list[ZabbixHostMetricsSnapshot],
+    ) -> str:
+        lines = ["<b>Zabbix Hosts</b>"]
+        for snapshot in snapshots:
+            lines.append("")
+            lines.append(f"<b>{html.escape(snapshot.label)}</b>")
+            lines.append(
+                "Status host: <b>INDISPONIVEL</b>"
+                if snapshot.unavailable
+                else "Status host: <b>OK</b>"
+            )
+            lines.append(f"CPU: {html.escape(self._format_zabbix_metric(snapshot, 'cpu'))}")
+            lines.append(
+                f"Memoria: {html.escape(self._format_zabbix_metric(snapshot, 'memory'))}"
+            )
+            lines.append(
+                f"Uptime: {html.escape(self._format_zabbix_metric(snapshot, 'uptime'))}"
+            )
+            lines.append(
+                f"Disco /: {html.escape(self._format_zabbix_metric(snapshot, 'disk_root_used_pct'))}"
+            )
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _format_zabbix_metric(
+        snapshot: ZabbixHostMetricsSnapshot,
+        metric_key: str,
+    ) -> str:
+        metric = snapshot.metrics.get(metric_key)
+        if metric is None or not metric.found or metric.value is None:
+            return "nao encontrado"
+        if metric_key in {"cpu", "memory"}:
+            return _format_percentage(metric.value)
+        if metric_key == "disk_root_used_pct":
+            return (
+                metric.value
+                if ":" in metric.value
+                else _format_percentage(metric.value)
+            )
+        if metric_key == "uptime":
+            return _format_uptime_seconds(metric.value)
+        return str(metric.value)
 
     async def voip_logs_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1289,6 +1444,11 @@ class BotHandlers:
             payload=None,
         )
         await self._execute_trigger(message, automation_context, "status")
+        await self._execute_zabbixh_in_all(
+            message,
+            trace_id=trace_id,
+            automation_context=automation_context,
+        )
         await self._execute_trigger(message, automation_context, "host")
         await self._execute_voips_in_all(
             message,
@@ -1315,6 +1475,94 @@ class BotHandlers:
             severity="info",
             payload=None,
         )
+
+    async def _execute_zabbixh_in_all(
+        self,
+        message: Message,
+        *,
+        trace_id: str,
+        automation_context: AutomationContext,
+    ) -> None:
+        if self._zabbix_provider is None:
+            await self._reply_chunks(
+                message,
+                "<b>Zabbix Hosts</b>\nFalha no /zabbixh: Zabbix nao configurado.",
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="zabbix_all_error",
+                command="/all",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "stage": "zabbixh_in_all",
+                    "error": "not_configured",
+                },
+            )
+            return
+
+        if not self._zabbixh_targets:
+            await self._reply_chunks(
+                message,
+                (
+                    "<b>Zabbix Hosts</b>\n"
+                    "Falha no /zabbixh: Nenhum host configurado em "
+                    "ZABBIXH_HOST_TARGETS_JSON."
+                ),
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="zabbix_all_error",
+                command="/all",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "stage": "zabbixh_in_all",
+                    "error": "no_targets_configured",
+                },
+            )
+            return
+
+        try:
+            snapshots = await self._zabbix_provider.fetch_host_metrics(
+                self._zabbixh_targets
+            )
+            await self._reply_chunks(message, self._build_zabbixh_message(snapshots))
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="zabbix_all_ok",
+                command="/all",
+                context=automation_context,
+                status="ok",
+                severity="info",
+                payload={
+                    "stage": "zabbixh_in_all",
+                    "host_count": len(snapshots),
+                    "unavailable_count": sum(
+                        1 for item in snapshots if item.unavailable
+                    ),
+                },
+            )
+        except Exception as exc:
+            error_text = str(exc)
+            await self._reply_chunks(
+                message,
+                f"<b>Zabbix Hosts</b>\nFalha no /zabbixh: {html.escape(error_text)}",
+            )
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="zabbix_all_error",
+                command="/all",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={
+                    "stage": "zabbixh_in_all",
+                    "error": error_text,
+                },
+            )
 
     async def _execute_voip_in_all(
         self,
@@ -1944,7 +2192,7 @@ class BotHandlers:
         destinations = result.destinations if isinstance(result.destinations, list) else []
         if not destinations:
             return []
-        lines = ["<b>Matriz</b>"]
+        lines = ["<b>Logs</b>"]
         for item in destinations:
             if not isinstance(item, dict):
                 continue
@@ -2157,3 +2405,37 @@ def _extract_ami_latency_ms(status_text: str | None) -> int | None:
     except (TypeError, ValueError):
         return None
 
+
+def _format_percentage(raw_value: str | None) -> str:
+    if raw_value is None:
+        return "nao encontrado"
+    try:
+        value = float(str(raw_value).strip())
+    except (TypeError, ValueError):
+        return str(raw_value)
+    formatted = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{formatted}%"
+
+
+def _format_uptime_seconds(raw_value: str | None) -> str:
+    if raw_value is None:
+        return "nao encontrado"
+    try:
+        total_seconds = int(float(str(raw_value).strip()))
+    except (TypeError, ValueError):
+        return str(raw_value)
+    if total_seconds < 0:
+        total_seconds = 0
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or parts:
+        parts.append(f"{hours}h")
+    if minutes or parts:
+        parts.append(f"{minutes}m")
+    if not parts:
+        parts.append(f"{seconds}s")
+    return " ".join(parts)
