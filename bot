@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+DATA_DIR="${BOT_DATA_DIR:-$PROJECT_DIR/data}"
+LOG_DIR="${BOT_LOG_DIR:-$PROJECT_DIR/logs}"
+PID_FILE="${BOT_PID_FILE:-$DATA_DIR/bot.pid}"
+LOG_FILE="${BOT_LOG_FILE:-$LOG_DIR/bot.log}"
+MAIN_FILE="${BOT_MAIN_FILE:-$PROJECT_DIR/src/main.py}"
+DEFAULT_PYTHON="$PROJECT_DIR/.venv/bin/python"
+
+usage() {
+    cat <<USAGE
+Uso: bot <start|stop|restart|logs|status>
+
+Comandos:
+  start      inicia o bot em background
+  stop       para o processo em execucao
+  restart    reinicia o bot
+  logs [n]   acompanha o log em tempo real, mostrando n linhas iniciais
+  status     mostra se o bot esta rodando
+
+Variaveis opcionais:
+  BOT_PYTHON_BIN      interpretador Python; padrao: .venv/bin/python ou python3
+  BOT_LOG_FILE        arquivo de log; padrao: logs/bot.log
+  BOT_PID_FILE        arquivo de PID; padrao: data/bot.pid
+USAGE
+}
+
+python_bin() {
+    if [[ -n "${BOT_PYTHON_BIN:-}" ]]; then
+        printf '%s\n' "$BOT_PYTHON_BIN"
+    elif [[ -x "$DEFAULT_PYTHON" ]]; then
+        printf '%s\n' "$DEFAULT_PYTHON"
+    else
+        printf '%s\n' "python3"
+    fi
+}
+
+ensure_runtime_dirs() {
+    mkdir -p "$DATA_DIR" "$LOG_DIR"
+}
+
+read_pid() {
+    if [[ -f "$PID_FILE" ]]; then
+        sed -n '1p' "$PID_FILE"
+    fi
+}
+
+is_pid_alive() {
+    local pid="${1:-}"
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+running_pid() {
+    local pid
+    pid="$(read_pid || true)"
+    if is_pid_alive "$pid"; then
+        printf '%s\n' "$pid"
+    fi
+}
+
+require_python() {
+    local interpreter="$1"
+    if [[ "$interpreter" == */* ]]; then
+        [[ -x "$interpreter" ]] || {
+            echo "Python nao encontrado ou nao executavel: $interpreter" >&2
+            echo "Crie a venv com: python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt" >&2
+            exit 1
+        }
+    elif ! command -v "$interpreter" >/dev/null 2>&1; then
+        echo "Python nao encontrado no PATH: $interpreter" >&2
+        exit 1
+    fi
+}
+
+start_bot() {
+    ensure_runtime_dirs
+    local current_pid interpreter started_pid grace_seconds
+    current_pid="$(running_pid || true)"
+    if [[ -n "$current_pid" ]]; then
+        echo "Bot ja esta rodando (pid $current_pid)."
+        return 0
+    fi
+
+    interpreter="$(python_bin)"
+    require_python "$interpreter"
+    : >> "$LOG_FILE"
+    {
+        echo
+        echo "== $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting bot =="
+    } >> "$LOG_FILE"
+
+    cd "$PROJECT_DIR"
+    if command -v python3 >/dev/null 2>&1; then
+        started_pid="$(
+            python3 - "$interpreter" "$MAIN_FILE" "$LOG_FILE" "$PROJECT_DIR" <<'PY'
+from __future__ import annotations
+
+import subprocess
+import sys
+
+interpreter, main_file, log_file, project_dir = sys.argv[1:5]
+log_handle = open(log_file, "ab", buffering=0)
+process = subprocess.Popen(
+    [interpreter, "-u", main_file],
+    cwd=project_dir,
+    stdin=subprocess.DEVNULL,
+    stdout=log_handle,
+    stderr=subprocess.STDOUT,
+    close_fds=True,
+    start_new_session=True,
+)
+print(process.pid)
+PY
+        )"
+    else
+        nohup "$interpreter" -u "$MAIN_FILE" >> "$LOG_FILE" 2>&1 < /dev/null &
+        started_pid="$!"
+    fi
+    printf '%s\n' "$started_pid" > "$PID_FILE"
+
+    grace_seconds="${BOT_STARTUP_GRACE_SECONDS:-2}"
+    sleep "$grace_seconds"
+    if is_pid_alive "$started_pid"; then
+        echo "Bot iniciado (pid $started_pid)."
+        echo "Logs: $LOG_FILE"
+        return 0
+    fi
+
+    rm -f "$PID_FILE"
+    echo "Bot falhou ao iniciar. Ultimas linhas do log:" >&2
+    tail -n 40 "$LOG_FILE" >&2 || true
+    return 1
+}
+
+stop_bot() {
+    ensure_runtime_dirs
+    local pid timeout elapsed
+    pid="$(read_pid || true)"
+    if ! is_pid_alive "$pid"; then
+        rm -f "$PID_FILE"
+        echo "Bot nao esta rodando."
+        return 0
+    fi
+
+    kill "$pid" 2>/dev/null || true
+    timeout="${BOT_STOP_TIMEOUT_SECONDS:-20}"
+    elapsed=0
+    while (( elapsed < timeout )); do
+        if ! is_pid_alive "$pid"; then
+            rm -f "$PID_FILE"
+            echo "Bot parado."
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    echo "Bot nao parou em ${timeout}s; encerrando a forca." >&2
+    kill -KILL "$pid" 2>/dev/null || true
+    rm -f "$PID_FILE"
+    echo "Bot parado."
+}
+
+logs_bot() {
+    ensure_runtime_dirs
+    local lines="${1:-120}"
+    if [[ ! "$lines" =~ ^[0-9]+$ ]]; then
+        echo "Uso: bot logs [linhas]" >&2
+        return 2
+    fi
+    touch "$LOG_FILE"
+    tail -n "$lines" -f "$LOG_FILE"
+}
+
+status_bot() {
+    ensure_runtime_dirs
+    local pid
+    pid="$(running_pid || true)"
+    if [[ -n "$pid" ]]; then
+        echo "Bot rodando (pid $pid)."
+    else
+        rm -f "$PID_FILE"
+        echo "Bot parado."
+    fi
+}
+
+command="${1:-}"
+case "$command" in
+    start)
+        start_bot
+        ;;
+    stop)
+        stop_bot
+        ;;
+    restart)
+        stop_bot
+        start_bot
+        ;;
+    logs)
+        shift || true
+        logs_bot "$@"
+        ;;
+    status)
+        status_bot
+        ;;
+    -h|--help|help|"")
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
