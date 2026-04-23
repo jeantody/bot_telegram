@@ -11,7 +11,7 @@ DEFAULT_PYTHON="$PROJECT_DIR/.venv/bin/python"
 
 usage() {
     cat <<USAGE
-Uso: bot <start|stop|restart|logs|status>
+Uso: bot <start|stop|restart|logs|status|test>
 
 Comandos:
   start      inicia o bot em background
@@ -19,11 +19,13 @@ Comandos:
   restart    reinicia o bot
   logs [n]   acompanha o log em tempo real, mostrando n linhas iniciais
   status     mostra se o bot esta rodando
+  test       roda a suite oficial local de TDD; aceita argumentos extras do pytest
 
 Variaveis opcionais:
   BOT_PYTHON_BIN      interpretador Python; padrao: .venv/bin/python ou python3
   BOT_LOG_FILE        arquivo de log; padrao: logs/bot.log
   BOT_PID_FILE        arquivo de PID; padrao: data/bot.pid
+  BOT_TDD_BASE_REF    ref Git usada para detectar mudancas que exigem gate live
 USAGE
 }
 
@@ -85,6 +87,90 @@ require_python() {
         echo "Python nao encontrado no PATH: $interpreter" >&2
         exit 1
     fi
+}
+
+git_repo_available() {
+    command -v git >/dev/null 2>&1 && git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+collect_changed_files() {
+    local base_ref
+    if ! git_repo_available; then
+        return 0
+    fi
+
+    base_ref="${BOT_TDD_BASE_REF:-origin/master}"
+    if git -C "$PROJECT_DIR" rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+        git -C "$PROJECT_DIR" diff --name-only "$base_ref"...HEAD --
+    fi
+    git -C "$PROJECT_DIR" diff --name-only --cached --
+    git -C "$PROJECT_DIR" diff --name-only --
+    git -C "$PROJECT_DIR" ls-files --others --exclude-standard
+}
+
+requires_link_summary_live_gate() {
+    local path
+    while IFS= read -r path; do
+        case "$path" in
+            .env.example|\
+            src/automations_lib/providers/link_summary_provider.py|\
+            src/bridge.py|\
+            src/config.py|\
+            src/discord_bridge_service.py|\
+            src/handlers.py|\
+            src/redaction.py|\
+            src/telegram_app.py|\
+            tests/test_bridge.py|\
+            tests/test_command_router.py|\
+            tests/test_config_loading.py|\
+            tests/test_discord_bridge_service.py|\
+            tests/test_link_summary_live.py|\
+            tests/test_link_summary_provider.py|\
+            tests/test_logging_utils.py)
+                return 0
+                ;;
+        esac
+    done < <(collect_changed_files | sort -u)
+    return 1
+}
+
+run_pytest() {
+    local interpreter="$1"
+    shift
+    "$interpreter" -m pytest -q "$@"
+}
+
+test_bot() {
+    local interpreter
+    interpreter="$(python_bin)"
+    require_python "$interpreter"
+
+    cd "$PROJECT_DIR"
+    if (( "$#" > 0 )); then
+        run_pytest "$interpreter" "$@"
+        return 0
+    fi
+
+    run_pytest \
+        "$interpreter" \
+        --cov=src \
+        --cov=tools/voip_probe \
+        --cov-report=term-missing \
+        --cov-fail-under=70
+
+    if ! requires_link_summary_live_gate; then
+        echo "Gate live de link-summary nao exigido para o diff atual."
+        return 0
+    fi
+
+    if [[ "${RUN_LINK_SUMMARY_LIVE_TESTS:-}" != "1" ]]; then
+        echo "Mudancas em link-summary/bridge detectadas. O gate live e obrigatorio." >&2
+        echo "Rode novamente com RUN_LINK_SUMMARY_LIVE_TESTS=1 ./bot test" >&2
+        return 1
+    fi
+
+    echo "Rodando gate live obrigatorio de link-summary..."
+    run_pytest "$interpreter" tests/test_link_summary_live.py
 }
 
 start_bot() {
@@ -220,6 +306,10 @@ case "$command" in
         ;;
     status)
         status_bot
+        ;;
+    test)
+        shift || true
+        test_bot "$@"
         ;;
     -h|--help|help|"")
         usage

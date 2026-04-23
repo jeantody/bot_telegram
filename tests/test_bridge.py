@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from src.bridge import BridgeNotifier, discord_text_from_telegram_html
+from src.bridge import BridgeDeliveryError, BridgeNotifier, discord_text_from_telegram_html
 from src.config import Settings
 
 
@@ -92,6 +92,56 @@ async def test_reply_from_telegram_mirrors_to_discord(monkeypatch) -> None:
 
     assert message.replies[0]["text"] == "<b>OK</b>"
     assert seen_payloads[0]["content"] == "**OK**"
+
+
+@pytest.mark.asyncio
+async def test_reply_from_telegram_keeps_local_reply_when_discord_fails(monkeypatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom", request=request)
+
+    monkeypatch.setattr(
+        "src.bridge.httpx.AsyncClient",
+        _make_async_client_factory(handler),
+    )
+    notifier = BridgeNotifier(build_settings())
+    message = FakeTelegramMessage()
+
+    await notifier.reply(message, "<b>OK</b>")
+
+    assert message.replies == [{"text": "<b>OK</b>", "kwargs": {}}]
+
+
+@pytest.mark.asyncio
+async def test_send_discord_plain_splits_large_payload(monkeypatch) -> None:
+    seen_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_payloads.append(json.loads(request.read().decode("utf-8")))
+        return httpx.Response(204, request=request)
+
+    monkeypatch.setattr(
+        "src.bridge.httpx.AsyncClient",
+        _make_async_client_factory(handler),
+    )
+    notifier = BridgeNotifier(build_settings())
+    content = "\n".join(["A" * 1200, "B" * 1200, "C" * 1200])
+
+    await notifier.send_discord_plain(content)
+
+    assert len(seen_payloads) == 3
+    assert all(len(item["content"]) <= 1900 for item in seen_payloads)
+
+
+@pytest.mark.asyncio
+async def test_send_telegram_requires_bot_and_chat_id() -> None:
+    notifier = BridgeNotifier(build_settings())
+
+    with pytest.raises(BridgeDeliveryError, match="Telegram bot indisponivel"):
+        await notifier.send_telegram(chat_id=123, text="oi")
+
+    notifier.set_telegram_bot(FakeTelegramBot())
+    with pytest.raises(BridgeDeliveryError, match="Telegram chat_id indisponivel"):
+        await notifier.send_telegram(chat_id=None, text="oi")
 
 
 @pytest.mark.asyncio

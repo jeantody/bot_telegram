@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -10,7 +12,8 @@ import pytest
 from src.automations_lib.models import AutomationResult
 from src.bridge import BridgeNotifier
 from src.config import Settings
-from src.discord_bridge_service import DiscordBridgeService
+from src import discord_bridge_service as discord_bridge_service_module
+from src.discord_bridge_service import DiscordBridgeService, _command_args, _command_name
 from src.handlers import BotHandlers
 
 
@@ -44,6 +47,47 @@ class FakeDiscordUser:
 @dataclass
 class FakeDiscordClient:
     user: FakeDiscordUser
+
+
+class RecordingHandlers:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, list[str], str | None]] = []
+        for name in (
+            "start",
+            "help",
+            "status",
+            "host",
+            "health",
+            "all",
+            "whois",
+            "cep",
+            "ping",
+            "ssl",
+            "voips",
+            "net",
+            "zabbixh",
+            "voip",
+            "call",
+            "voip_logs",
+            "note",
+            "lembrete",
+            "logs",
+            "text",
+        ):
+            setattr(self, f"{name}_handler", self._make_handler(name))
+
+    def _make_handler(self, name: str):
+        async def _inner(update, context) -> None:
+            self.calls.append(
+                (
+                    name,
+                    update.message.text,
+                    list(context.args),
+                    getattr(context.bot, "username", None),
+                )
+            )
+
+        return _inner
 
 
 class FakeTelegramBot:
@@ -113,6 +157,14 @@ def _make_async_client_factory(handler):
         return real_async_client(*args, transport=transport, **kwargs)
 
     return factory
+
+
+def test_command_helpers_parse_slash_commands() -> None:
+    assert _command_name("/whois example.com") == "whois"
+    assert _command_name("/status@bot_teste") == "status"
+    assert _command_name("status") is None
+    assert _command_args("/whois example.com") == ["example.com"]
+    assert _command_args("status") == []
 
 
 @pytest.mark.asyncio
@@ -188,3 +240,110 @@ async def test_discord_bridge_ignores_webhook_messages(monkeypatch) -> None:
 
     assert orchestrator.called_triggers == []
     assert telegram_bot.messages == []
+
+
+@pytest.mark.asyncio
+async def test_discord_bridge_routes_slash_command_with_args() -> None:
+    settings = build_settings()
+    notifier = BridgeNotifier(settings)
+    handlers = RecordingHandlers()
+    service = DiscordBridgeService(
+        settings=settings,
+        handlers=handlers,  # type: ignore[arg-type]
+        bridge_notifier=notifier,
+    )
+
+    await service._on_discord_message(
+        FakeDiscordMessage(
+            content="/whois example.com",
+            channel=FakeChannel(id=456),
+            author=FakeAuthor(id=999, name="ana"),
+        ),
+        FakeDiscordClient(user=FakeDiscordUser(id=111, name="bot")),
+    )
+
+    assert handlers.calls == [("whois", "/whois example.com", ["example.com"], "bot")]
+
+
+@pytest.mark.asyncio
+async def test_resolve_channel_id_reads_webhook_metadata(monkeypatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        return httpx.Response(200, json={"channel_id": "456"}, request=request)
+
+    monkeypatch.setattr(
+        "src.discord_bridge_service.httpx.AsyncClient",
+        _make_async_client_factory(handler),
+    )
+    settings = build_settings(discord_bridge_channel_id=None)
+    service = DiscordBridgeService(
+        settings=settings,
+        handlers=RecordingHandlers(),  # type: ignore[arg-type]
+        bridge_notifier=BridgeNotifier(settings),
+    )
+
+    assert await service._resolve_channel_id() == 456
+
+
+@pytest.mark.asyncio
+async def test_start_rejects_missing_discord_token() -> None:
+    settings = build_settings(discord_bot_token="")
+    service = DiscordBridgeService(
+        settings=settings,
+        handlers=RecordingHandlers(),  # type: ignore[arg-type]
+        bridge_notifier=BridgeNotifier(settings),
+    )
+
+    with pytest.raises(RuntimeError, match="DISCORD_BOT_TOKEN obrigatorio"):
+        await service.start()
+
+
+@pytest.mark.asyncio
+async def test_start_and_stop_manage_discord_client(monkeypatch) -> None:
+    created_clients: list[object] = []
+
+    class FakeClient:
+        def __init__(self, *, intents) -> None:
+            self.intents = intents
+            self.started_with: str | None = None
+            self.closed = False
+            created_clients.append(self)
+
+        def event(self, callback):
+            return callback
+
+        async def start(self, token: str) -> None:
+            self.started_with = token
+            await asyncio.sleep(0)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    fake_discord = SimpleNamespace(
+        Intents=SimpleNamespace(default=lambda: SimpleNamespace(message_content=False)),
+        Client=FakeClient,
+    )
+    monkeypatch.setattr(discord_bridge_service_module, "discord", fake_discord)
+
+    settings = build_settings(
+        discord_bot_token="discord-token",
+        discord_bridge_channel_id=456,
+    )
+    service = DiscordBridgeService(
+        settings=settings,
+        handlers=RecordingHandlers(),  # type: ignore[arg-type]
+        bridge_notifier=BridgeNotifier(settings),
+    )
+
+    await service.start()
+    await asyncio.sleep(0)
+
+    fake_client = created_clients[0]
+    assert fake_client.started_with == "discord-token"
+    assert fake_client.intents.message_content is True
+
+    await service.stop()
+
+    assert fake_client.closed is True
+    assert service._client is None
+    assert service._task is None

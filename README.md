@@ -110,12 +110,40 @@ O primeiro serve para a sala unica Telegram/Discord; o segundo arquiva links ute
 .venv/bin/python src/main.py
 ```
 
-## Testes
+Ou use o wrapper operacional do projeto:
+
 ```bash
-.venv/bin/python -m pytest -q
+./bot start
+./bot stop
+./bot restart
+./bot logs
+./bot status
 ```
 
-Para alteracoes no Zabbix, o gate minimo recomendado e:
+## Testes
+Entry point oficial local de TDD:
+
+```bash
+./bot test
+```
+
+Esse comando roda:
+- a suite deterministica completa com coverage minima de 70%;
+- o gate live de link-summary quando o diff atual toca codigo/config/testes dessa feature.
+
+Se o gate live for exigido, rode:
+
+```bash
+RUN_LINK_SUMMARY_LIVE_TESTS=1 ./bot test
+```
+
+Para chamadas manuais de pytest, a suite base continua sendo:
+
+```bash
+.venv/bin/python -m pytest -q --cov=src --cov=tools/voip_probe --cov-report=term-missing --cov-fail-under=70
+```
+
+Para alteracoes no Zabbix, o gate minimo recomendado continua sendo:
 
 ```bash
 .venv/bin/python -m pytest -q tests/test_zabbix_provider.py
@@ -132,6 +160,10 @@ RUN_LINK_SUMMARY_LIVE_TESTS=1 .venv/bin/python -m pytest -q tests/test_link_summ
 
 O teste live publica uma mensagem de validacao no Discord configurado e falha se o
 modelo Ollama nao conseguir gerar resposta.
+
+O GitHub Actions roda apenas a suite deterministica com coverage. O gate live fica
+no fluxo local porque depende do `.env` real, do Ollama da rede interna e do webhook
+do Discord.
 
 ## Observacoes de seguranca
 - Nao versione `.env`

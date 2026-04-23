@@ -231,6 +231,7 @@ def test_build_application_registers_handlers_and_services(monkeypatch) -> None:
     monkeypatch.setattr(telegram_app, "ProactiveService", make_service("proactive"))
     monkeypatch.setattr(telegram_app, "ReminderService", make_service("reminder"))
     monkeypatch.setattr(telegram_app, "VoipProbeService", make_service("voip_probe"))
+    monkeypatch.setattr(telegram_app, "DiscordBridgeService", make_service("discord_bridge"))
 
     built_application = telegram_app.build_application(settings)
 
@@ -275,6 +276,7 @@ def test_build_application_registers_handlers_and_services(monkeypatch) -> None:
     assert "proactive_service" in application.bot_data
     assert "reminder_service" in application.bot_data
     assert "voip_probe_service" in application.bot_data
+    assert "discord_bridge_service" in application.bot_data
     assert "zabbix_provider" in application.bot_data
 
     state_store = application.bot_data["state_store"]
@@ -284,9 +286,11 @@ def test_build_application_registers_handlers_and_services(monkeypatch) -> None:
     assert isinstance(application.bot_data["proactive_service"], FakeService)
     assert isinstance(application.bot_data["reminder_service"], FakeService)
     assert isinstance(application.bot_data["voip_probe_service"], FakeService)
+    assert isinstance(application.bot_data["discord_bridge_service"], FakeService)
     assert application.bot_data["proactive_service"] is created["proactive"]
     assert application.bot_data["reminder_service"] is created["reminder"]
     assert application.bot_data["voip_probe_service"] is created["voip_probe"]
+    assert application.bot_data["discord_bridge_service"] is created["discord_bridge"]
 
     voip_provider = application.bot_data["voip_probe_service"].kwargs["provider"]
     assert isinstance(voip_provider, FakeVoipProbeProvider)
@@ -327,6 +331,7 @@ def test_build_application_skips_zabbix_provider_when_not_configured(monkeypatch
     monkeypatch.setattr(telegram_app, "ProactiveService", lambda **kwargs: FakeService(**kwargs))
     monkeypatch.setattr(telegram_app, "ReminderService", lambda **kwargs: FakeService(**kwargs))
     monkeypatch.setattr(telegram_app, "VoipProbeService", lambda **kwargs: FakeService(**kwargs))
+    monkeypatch.setattr(telegram_app, "DiscordBridgeService", lambda **kwargs: FakeService(**kwargs))
 
     telegram_app.build_application(settings)
 
@@ -338,11 +343,13 @@ async def test_post_init_starts_available_services() -> None:
     proactive = FakeService()
     reminder = FakeService()
     voip_probe = FakeService()
+    discord_bridge = FakeService()
     application = LifecycleApplication(
         bot_data={
             "proactive_service": proactive,
             "reminder_service": reminder,
             "voip_probe_service": voip_probe,
+            "discord_bridge_service": discord_bridge,
         }
     )
 
@@ -351,6 +358,7 @@ async def test_post_init_starts_available_services() -> None:
     assert proactive.started is True
     assert reminder.started is True
     assert voip_probe.started is True
+    assert discord_bridge.started is True
 
 
 @pytest.mark.asyncio
@@ -367,12 +375,14 @@ async def test_post_shutdown_stops_services_and_closes_state_store() -> None:
     proactive = FakeService()
     reminder = FakeService()
     voip_probe = FakeService()
+    discord_bridge = FakeService()
     state_store = FakeStateStore("data/state.db")
     application = LifecycleApplication(
         bot_data={
             "proactive_service": proactive,
             "reminder_service": reminder,
             "voip_probe_service": voip_probe,
+            "discord_bridge_service": discord_bridge,
             "state_store": state_store,
         }
     )
@@ -382,6 +392,7 @@ async def test_post_shutdown_stops_services_and_closes_state_store() -> None:
     assert proactive.stopped is True
     assert reminder.stopped is True
     assert voip_probe.stopped is True
+    assert discord_bridge.stopped is True
     assert state_store.closed is True
 
 

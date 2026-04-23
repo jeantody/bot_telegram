@@ -188,6 +188,52 @@ async def test_summarize_and_save_rejects_invalid_url() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scrape_reports_http_status_error(monkeypatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(404, text="not found", request=request)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    monkeypatch.setattr(
+        "src.automations_lib.providers.link_summary_provider.httpx.AsyncClient",
+        _make_async_client_factory(handler),
+    )
+    provider = LinkSummaryProvider(
+        ollama_base_url="http://192.168.0.14:11434",
+        ollama_model="gemma4:e2b",
+        discord_webhook_url="https://discord.com/api/webhooks/1/token",
+        timeout_seconds=10,
+        max_text_chars=6000,
+    )
+
+    with pytest.raises(LinkSummaryError, match="Scraping falhou: HTTP 404"):
+        await provider.scrape("https://example.com/missing")
+
+
+@pytest.mark.asyncio
+async def test_scrape_rejects_empty_page(monkeypatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, text="  \n\t ", request=request)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    monkeypatch.setattr(
+        "src.automations_lib.providers.link_summary_provider.httpx.AsyncClient",
+        _make_async_client_factory(handler),
+    )
+    provider = LinkSummaryProvider(
+        ollama_base_url="http://192.168.0.14:11434",
+        ollama_model="gemma4:e2b",
+        discord_webhook_url="https://discord.com/api/webhooks/1/token",
+        timeout_seconds=10,
+        max_text_chars=6000,
+    )
+
+    with pytest.raises(LinkSummaryError, match="Nao foi possivel extrair texto"):
+        await provider.scrape("https://example.com/blank")
+
+
+@pytest.mark.asyncio
 async def test_summarize_reports_ollama_error_body(monkeypatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/api/generate":
@@ -225,3 +271,71 @@ async def test_summarize_reports_ollama_error_body(monkeypatch) -> None:
 
     with pytest.raises(LinkSummaryError, match="model requires more system memory"):
         await provider.summarize(scrape)
+
+
+@pytest.mark.asyncio
+async def test_summarize_rejects_empty_model_response(monkeypatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/generate":
+            return httpx.Response(200, json={"response": "   "}, request=request)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    monkeypatch.setattr(
+        "src.automations_lib.providers.link_summary_provider.httpx.AsyncClient",
+        _make_async_client_factory(handler),
+    )
+    provider = LinkSummaryProvider(
+        ollama_base_url="http://192.168.0.14:11434",
+        ollama_model="gemma4:e2b",
+        discord_webhook_url="https://discord.com/api/webhooks/1/token",
+        timeout_seconds=10,
+        max_text_chars=6000,
+    )
+    scrape = LinkScrapeResult(
+        url="https://example.com",
+        final_url="https://example.com",
+        title="Example",
+        description="Example page",
+        extracted_text="Example page content",
+    )
+
+    with pytest.raises(LinkSummaryError, match="Ollama retornou resposta vazia"):
+        await provider.summarize(scrape)
+
+
+@pytest.mark.asyncio
+async def test_send_to_discord_reports_json_error(monkeypatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.host == "discord.com":
+            return httpx.Response(
+                429,
+                json={"message": "rate limited"},
+                request=request,
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    monkeypatch.setattr(
+        "src.automations_lib.providers.link_summary_provider.httpx.AsyncClient",
+        _make_async_client_factory(handler),
+    )
+    provider = LinkSummaryProvider(
+        ollama_base_url="http://192.168.0.14:11434",
+        ollama_model="gemma4:e2b",
+        discord_webhook_url="https://discord.com/api/webhooks/1/token",
+        timeout_seconds=10,
+        max_text_chars=6000,
+    )
+    scrape = LinkScrapeResult(
+        url="https://example.com",
+        final_url="https://example.com/docs",
+        title="Docs",
+        description="Descricao",
+        extracted_text="Texto",
+    )
+
+    with pytest.raises(LinkSummaryError, match="Discord falhou: HTTP 429: rate limited"):
+        await provider.send_to_discord(
+            scrape=scrape,
+            summary="Resumo",
+            source_label="Telegram chat_id=123",
+        )

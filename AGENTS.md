@@ -32,6 +32,7 @@ Comandos operacionais locais:
 ./bot restart
 ./bot logs
 ./bot status
+./bot test
 ```
 
 Quando `/usr/local/bin/bot` apontar para este script, os mesmos comandos podem
@@ -53,6 +54,8 @@ Funcoes internas do script `bot`:
 - `logs_bot()`: executa `tail -f` em `logs/bot.log`, com quantidade inicial
   opcional de linhas.
 - `status_bot()`: sincroniza `data/bot.pid` e mostra se o processo esta rodando.
+- `test_bot()`: executa a suite oficial local com coverage e exige o gate live
+  de link-summary quando o diff atual toca arquivos criticos dessa feature.
 
 Variaveis aceitas pelo script:
 
@@ -61,6 +64,7 @@ Variaveis aceitas pelo script:
 - `BOT_PID_FILE`: define o arquivo de PID.
 - `BOT_STARTUP_GRACE_SECONDS`: tempo de espera apos iniciar.
 - `BOT_STOP_TIMEOUT_SECONDS`: tempo para SIGTERM antes de SIGKILL.
+- `BOT_TDD_BASE_REF`: ref Git usada para detectar mudancas que exigem gate live.
 
 ## Arquitetura de Runtime
 
@@ -218,8 +222,13 @@ O ambiente local pode usar `bin/sipp`, um wrapper que carrega bibliotecas de `li
 Comando geral:
 
 ```bash
-.venv/bin/python -m pytest -q
+./bot test
 ```
+
+O comando `./bot test` e o entry point oficial local de TDD. Ele roda a suite
+deterministica com coverage minima de 70% e, quando o diff atual toca
+`link_summary_provider`, roteamento, bridge ou configuracao relacionada, falha
+sem `RUN_LINK_SUMMARY_LIVE_TESTS=1`.
 
 Gates focados:
 
@@ -235,11 +244,14 @@ Sempre rode pelo menos os testes de configuracao e roteamento quando alterar `.e
 Para qualquer alteracao no resumo automatico de links, rode tambem o gate TDD obrigatorio:
 
 ```bash
-.venv/bin/python -m pytest -q tests/test_link_summary_provider.py tests/test_command_router.py tests/test_config_loading.py tests/test_logging_utils.py
-RUN_LINK_SUMMARY_LIVE_TESTS=1 .venv/bin/python -m pytest -q tests/test_link_summary_live.py
+RUN_LINK_SUMMARY_LIVE_TESTS=1 ./bot test
 ```
 
 O teste live usa o `.env` real, chama o Ollama configurado e publica no webhook do Discord.
+
+O workflow versionado em `.github/workflows/tests.yml` roda somente a suite
+deterministica com coverage; o gate live continua local por depender da rede e
+de segredos reais.
 
 ## Manutencao
 
