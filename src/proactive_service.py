@@ -16,6 +16,7 @@ from src.automations_lib.models import AutomationContext, AutomationResult
 from src.automations_lib.orchestrator import StatusOrchestrator
 from src.automations_lib.providers.ami_client import AmiError
 from src.automations_lib.providers.issabel_ami_provider import IssabelAmiProvider
+from src.bridge import BridgeNotifier
 from src.config import AlertPriorityRule, Settings
 from src.message_utils import split_message
 from src.state_store import BotStateStore
@@ -36,11 +37,13 @@ class ProactiveService:
         orchestrator: StatusOrchestrator,
         state_store: BotStateStore,
         issabel_provider: IssabelAmiProvider | None = None,
+        bridge_notifier: BridgeNotifier | None = None,
     ) -> None:
         self._application = application
         self._settings = settings
         self._orchestrator = orchestrator
         self._state_store = state_store
+        self._bridge_notifier = bridge_notifier
         self._task: asyncio.Task | None = None
         self._last_check_at: datetime | None = None
         self._last_morning_date: str | None = None
@@ -385,12 +388,20 @@ class ProactiveService:
                 await asyncio.sleep(1)
 
     async def _send_text(self, chat_id: int, text: str) -> None:
-        await self._application.bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+        if self._bridge_notifier is not None:
+            await self._bridge_notifier.send_telegram(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        else:
+            await self._application.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
 
     def _build_context(self, trace_id: str, command_name: str) -> AutomationContext:
         return AutomationContext(

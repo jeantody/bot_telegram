@@ -13,6 +13,7 @@ from src.automations_lib.providers.voip_probe_provider import (
     VoipProbeProvider,
     VoipProbeResult,
 )
+from src.bridge import BridgeNotifier
 from src.config import Settings
 from src.state_store import BotStateStore
 
@@ -28,11 +29,13 @@ class VoipProbeService:
         settings: Settings,
         state_store: BotStateStore,
         provider: VoipProbeProvider,
+        bridge_notifier: BridgeNotifier | None = None,
     ) -> None:
         self._application = application
         self._settings = settings
         self._state_store = state_store
         self._provider = provider
+        self._bridge_notifier = bridge_notifier
         self._task: asyncio.Task | None = None
         self._tzinfo = _resolve_timezone(settings.bot_timezone)
 
@@ -84,11 +87,9 @@ class VoipProbeService:
                 },
             )
             if chat_id is not None and self._should_alert(result):
-                await self._application.bot.send_message(
+                await self._send_text(
                     chat_id=chat_id,
                     text=self._format_alert_message(result),
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
                 )
         except Exception as exc:
             self._state_store.record_audit_event(
@@ -103,16 +104,30 @@ class VoipProbeService:
                 payload={"error": str(exc)},
             )
             if chat_id is not None:
-                await self._application.bot.send_message(
+                await self._send_text(
                     chat_id=chat_id,
                     text=(
                         "<b>Alerta VoIP</b>\n"
                         "Falha ao executar teste automatico.\n"
                         f"Erro: {html.escape(str(exc))}"
                     ),
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
                 )
+
+    async def _send_text(self, *, chat_id: int, text: str) -> None:
+        if self._bridge_notifier is not None:
+            await self._bridge_notifier.send_telegram(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        else:
+            await self._application.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
 
     def _should_alert(self, result: VoipProbeResult) -> bool:
         if not result.ok:

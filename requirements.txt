@@ -1,4 +1,5 @@
 python-telegram-bot==22.6
+discord.py==2.7.1
 python-dotenv==1.1.1
 httpx==0.28.1
 feedparser==6.0.12

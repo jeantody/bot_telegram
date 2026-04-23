@@ -98,6 +98,15 @@ class Settings:
     zabbix_api_token: str | None = None
     zabbix_timeout_seconds: int = 8
     zabbixh_host_targets: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    link_summary_ollama_base_url: str = "http://192.168.0.14:11434"
+    link_summary_ollama_model: str = "gemma4:e2b"
+    link_summary_discord_webhook_url: str = ""
+    link_summary_timeout_seconds: int = 30
+    link_summary_max_text_chars: int = 6000
+    discord_bridge_enabled: bool = False
+    discord_bot_token: str = ""
+    discord_bridge_webhook_url: str = ""
+    discord_bridge_channel_id: int | None = None
 
 
 def _read_int(name: str, default: int) -> int:
@@ -338,6 +347,29 @@ def _validate_zabbix_config(
         )
 
 
+def _validate_discord_bridge_config(
+    *,
+    enabled: bool,
+    bot_token: str,
+    webhook_url: str,
+    telegram_allowed_chat_id: int | None,
+) -> None:
+    if not enabled:
+        return
+    missing: list[str] = []
+    if not bot_token:
+        missing.append("DISCORD_BOT_TOKEN")
+    if not webhook_url:
+        missing.append("DISCORD_BRIDGE_WEBHOOK_URL")
+    if telegram_allowed_chat_id is None:
+        missing.append("TELEGRAM_ALLOWED_CHAT_ID")
+    if missing:
+        raise ValueError(
+            "Incomplete Discord bridge configuration. "
+            f"Missing: {', '.join(missing)}."
+        )
+
+
 def load_settings() -> Settings:
     validate_env_contract()
     # Ensure local .env values win over stale shell/system environment values.
@@ -358,9 +390,20 @@ def load_settings() -> Settings:
     configured_ami_port = _read_int("ISSABEL_AMI_PORT", 5038)
     ami_port = rawman_port if rawman_url and rawman_port is not None else configured_ami_port
 
+    telegram_allowed_chat_id = _read_optional_int("TELEGRAM_ALLOWED_CHAT_ID")
+    discord_bridge_enabled = _read_bool("DISCORD_BRIDGE_ENABLED", False)
+    discord_bot_token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+    discord_bridge_webhook_url = os.getenv("DISCORD_BRIDGE_WEBHOOK_URL", "").strip()
+    _validate_discord_bridge_config(
+        enabled=discord_bridge_enabled,
+        bot_token=discord_bot_token,
+        webhook_url=discord_bridge_webhook_url,
+        telegram_allowed_chat_id=telegram_allowed_chat_id,
+    )
+
     return Settings(
         telegram_bot_token=token,
-        telegram_allowed_chat_id=_read_optional_int("TELEGRAM_ALLOWED_CHAT_ID"),
+        telegram_allowed_chat_id=telegram_allowed_chat_id,
         request_timeout_seconds=_read_int("REQUEST_TIMEOUT_SECONDS", 20),
         automation_timeout_seconds=_read_int("AUTOMATION_TIMEOUT_SECONDS", 30),
         weather_timezone=os.getenv("WEATHER_TIMEZONE", "America/Sao_Paulo").strip(),
@@ -507,4 +550,22 @@ def load_settings() -> Settings:
         zabbix_api_token=zabbix_api_token,
         zabbix_timeout_seconds=_read_int("ZABBIX_TIMEOUT_SECONDS", 8),
         zabbixh_host_targets=_read_zabbix_host_targets("ZABBIXH_HOST_TARGETS_JSON"),
+        link_summary_ollama_base_url=os.getenv(
+            "LINK_SUMMARY_OLLAMA_BASE_URL",
+            "http://192.168.0.14:11434",
+        ).strip(),
+        link_summary_ollama_model=os.getenv(
+            "LINK_SUMMARY_OLLAMA_MODEL",
+            "gemma4:e2b",
+        ).strip(),
+        link_summary_discord_webhook_url=os.getenv(
+            "LINK_SUMMARY_DISCORD_WEBHOOK_URL",
+            "",
+        ).strip(),
+        link_summary_timeout_seconds=_read_int("LINK_SUMMARY_TIMEOUT_SECONDS", 30),
+        link_summary_max_text_chars=_read_int("LINK_SUMMARY_MAX_TEXT_CHARS", 6000),
+        discord_bridge_enabled=discord_bridge_enabled,
+        discord_bot_token=discord_bot_token,
+        discord_bridge_webhook_url=discord_bridge_webhook_url,
+        discord_bridge_channel_id=_read_optional_int("DISCORD_BRIDGE_CHANNEL_ID"),
     )

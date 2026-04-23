@@ -17,6 +17,10 @@ from src.automations_lib.orchestrator import StatusOrchestrator
 from src.automations_lib.providers.ami_client import AmiError
 from src.automations_lib.providers.cep_provider import CepProvider
 from src.automations_lib.providers.issabel_ami_provider import IssabelAmiProvider
+from src.automations_lib.providers.link_summary_provider import (
+    LinkSummaryProvider,
+    extract_standalone_url,
+)
 from src.automations_lib.providers.net_units_provider import evaluate_net_units
 from src.automations_lib.providers.network_diagnostics_provider import (
     NetworkDiagnosticsProvider,
@@ -32,6 +36,7 @@ from src.automations_lib.providers.zabbix_provider import (
     ZabbixProvider,
 )
 from src.config import Settings
+from src.bridge import BridgeNotifier
 from src.message_utils import split_message
 from src.state_store import BotStateStore
 
@@ -93,10 +98,13 @@ class BotHandlers:
         voip_provider: VoipProbeProvider | None = None,
         issabel_provider: IssabelAmiProvider | None = None,
         zabbix_provider: ZabbixProvider | None = None,
+        link_summary_provider: LinkSummaryProvider | None = None,
+        bridge_notifier: BridgeNotifier | None = None,
     ) -> None:
         self._settings = settings
         self._orchestrator = orchestrator
         self._state_store = state_store
+        self._bridge_notifier = bridge_notifier
         self._whois_provider = whois_provider or WhoisProvider(
             timeout_seconds=settings.request_timeout_seconds,
             global_template=settings.whois_rdap_global_url_template,
@@ -145,6 +153,13 @@ class BotHandlers:
                 api_token=settings.zabbix_api_token,
                 timeout_seconds=settings.zabbix_timeout_seconds,
             )
+        self._link_summary_provider = link_summary_provider or LinkSummaryProvider(
+            ollama_base_url=settings.link_summary_ollama_base_url,
+            ollama_model=settings.link_summary_ollama_model,
+            discord_webhook_url=settings.link_summary_discord_webhook_url,
+            timeout_seconds=settings.link_summary_timeout_seconds,
+            max_text_chars=settings.link_summary_max_text_chars,
+        )
         self._zabbixh_targets = tuple(
             ZabbixHostTarget(hostid=hostid, label=label)
             for label, hostid in settings.zabbixh_host_targets
@@ -158,7 +173,7 @@ class BotHandlers:
         del context
         if not update.message:
             return
-        await update.message.reply_text(
+        await self._reply_text(update.message, 
             "Bot online. Use /status, /host, /health, /whois, /cep, /ping, /ssl, "
             "/voips, /net, /zabbixh, /voip, /call, /voip_logs, /note, /lembrete, /logs ou /all."
         )
@@ -169,7 +184,7 @@ class BotHandlers:
         del context
         if not update.message:
             return
-        await update.message.reply_text(
+        await self._reply_text(update.message, 
             "Comandos: /start, /help, status, /status, /host, /health, /whois, "
             "/cep, /ping, /ssl, /voips, /net, /zabbixh, /voip, /call, /voip_logs, /note, /lembrete, /logs, /all"
         )
@@ -198,7 +213,7 @@ class BotHandlers:
         message, _, trace_id, automation_context = prepared
         raw_target = " ".join(context.args).strip()
         if not raw_target:
-            await message.reply_text("Uso: /whois dominio.com")
+            await self._reply_text(message, "Uso: /whois dominio.com")
             return
         self._record_audit(
             trace_id=trace_id,
@@ -263,7 +278,7 @@ class BotHandlers:
                 payload={"domain": result.domain},
             )
         except Exception as exc:
-            await message.reply_text(f"Falha no /whois: {exc}")
+            await self._reply_text(message, f"Falha no /whois: {exc}")
             self._record_audit(
                 trace_id=trace_id,
                 event_type="command_end",
@@ -283,7 +298,7 @@ class BotHandlers:
         message, _, trace_id, automation_context = prepared
         raw_cep = " ".join(context.args).strip()
         if not raw_cep:
-            await message.reply_text("Uso: /cep 01001000")
+            await self._reply_text(message, "Uso: /cep 01001000")
             return
         self._record_audit(
             trace_id=trace_id,
@@ -316,7 +331,7 @@ class BotHandlers:
                 payload={"cep": info.cep},
             )
         except Exception as exc:
-            await message.reply_text(f"Falha no /cep: {exc}")
+            await self._reply_text(message, f"Falha no /cep: {exc}")
             self._record_audit(
                 trace_id=trace_id,
                 event_type="command_end",
@@ -336,7 +351,7 @@ class BotHandlers:
         message, _, trace_id, automation_context = prepared
         target = " ".join(context.args).strip()
         if not target:
-            await message.reply_text("Uso: /ping host")
+            await self._reply_text(message, "Uso: /ping host")
             return
         self._record_audit(
             trace_id=trace_id,
@@ -381,7 +396,7 @@ class BotHandlers:
                 payload={"host": diag.host, "ping_ok": diag.ping.ok, "trace_ok": diag.traceroute.ok},
             )
         except Exception as exc:
-            await message.reply_text(f"Falha no /ping: {exc}")
+            await self._reply_text(message, f"Falha no /ping: {exc}")
             self._record_audit(
                 trace_id=trace_id,
                 event_type="command_end",
@@ -401,7 +416,7 @@ class BotHandlers:
         message, _, trace_id, automation_context = prepared
         target = " ".join(context.args).strip()
         if not target:
-            await message.reply_text("Uso: /ssl dominio.com ou /ssl dominio.com:443")
+            await self._reply_text(message, "Uso: /ssl dominio.com ou /ssl dominio.com:443")
             return
         self._record_audit(
             trace_id=trace_id,
@@ -435,7 +450,7 @@ class BotHandlers:
                 payload={"host": info.host, "days_remaining": info.days_remaining},
             )
         except Exception as exc:
-            await message.reply_text(f"Falha no /ssl: {exc}")
+            await self._reply_text(message, f"Falha no /ssl: {exc}")
             self._record_audit(
                 trace_id=trace_id,
                 event_type="command_end",
@@ -515,7 +530,7 @@ class BotHandlers:
                 },
             )
         except ValueError:
-            await message.reply_text(
+            await self._reply_text(message, 
                 "ISSABEL AMI nao configurado. Configure "
                 "ISSABEL_AMI_RAWMAN_URL ou ISSABEL_AMI_HOST + usuario/secret."
             )
@@ -542,7 +557,7 @@ class BotHandlers:
                 payload={"error": "not_configured"},
             )
         except AmiError as exc:
-            await message.reply_text(f"Falha no /voips: {exc}")
+            await self._reply_text(message, f"Falha no /voips: {exc}")
             self._record_audit(
                 trace_id=trace_id,
                 event_type="ami_query_end",
@@ -566,7 +581,7 @@ class BotHandlers:
                 payload={"error": str(exc)},
             )
         except Exception as exc:
-            await message.reply_text(f"Falha no /voips: {exc}")
+            await self._reply_text(message, f"Falha no /voips: {exc}")
             self._record_audit(
                 trace_id=trace_id,
                 event_type="ami_query_end",
@@ -659,7 +674,7 @@ class BotHandlers:
                 payload=payload,
             )
         except ValueError:
-            await message.reply_text(
+            await self._reply_text(message, 
                 "ISSABEL AMI nao configurado. Configure "
                 "ISSABEL_AMI_RAWMAN_URL ou ISSABEL_AMI_HOST + usuario/secret."
             )
@@ -687,7 +702,7 @@ class BotHandlers:
             )
         except AmiError as exc:
             error_text = str(exc)
-            await message.reply_text(f"Falha no /net: {error_text}")
+            await self._reply_text(message, f"Falha no /net: {error_text}")
             self._record_audit(
                 trace_id=trace_id,
                 event_type="ami_query_end",
@@ -712,7 +727,7 @@ class BotHandlers:
             )
         except Exception as exc:
             error_text = str(exc)
-            await message.reply_text(f"Falha no /net: {error_text}")
+            await self._reply_text(message, f"Falha no /net: {error_text}")
             self._record_audit(
                 trace_id=trace_id,
                 event_type="ami_query_end",
@@ -754,7 +769,7 @@ class BotHandlers:
             payload={"hostids": [item.hostid for item in self._zabbixh_targets]},
         )
         if self._zabbix_provider is None:
-            await message.reply_text("Zabbix nao configurado.")
+            await self._reply_text(message, "Zabbix nao configurado.")
             self._record_audit(
                 trace_id=trace_id,
                 event_type="command_end",
@@ -766,7 +781,7 @@ class BotHandlers:
             )
             return
         if not self._zabbixh_targets:
-            await message.reply_text(
+            await self._reply_text(message, 
                 "Nenhum host configurado em ZABBIXH_HOST_TARGETS_JSON."
             )
             self._record_audit(
@@ -797,7 +812,7 @@ class BotHandlers:
                 },
             )
         except Exception as exc:
-            await message.reply_text(f"Falha no /zabbixh: {exc}")
+            await self._reply_text(message, f"Falha no /zabbixh: {exc}")
             self._record_audit(
                 trace_id=trace_id,
                 event_type="command_end",
@@ -866,7 +881,7 @@ class BotHandlers:
                 },
             )
         except Exception as exc:
-            await message.reply_text(f"Falha no /voip: {exc}")
+            await self._reply_text(message, f"Falha no /voip: {exc}")
             self._record_audit(
                 trace_id=trace_id,
                 event_type="command_end",
@@ -885,11 +900,11 @@ class BotHandlers:
             return
         message, _, trace_id, automation_context = prepared
         if not context.args or len(context.args) != 1:
-            await message.reply_text("Uso: /call <numero|ramal>")
+            await self._reply_text(message, "Uso: /call <numero|ramal>")
             return
         target = str(context.args[0] or "").strip()
         if not self.CALL_TARGET_RE.fullmatch(target):
-            await message.reply_text(
+            await self._reply_text(message, 
                 "Destino invalido. Use apenas digitos e opcionalmente +, * ou #."
             )
             return
@@ -945,7 +960,7 @@ class BotHandlers:
                 },
             )
         except Exception as exc:
-            await message.reply_text(f"Falha no /call: {exc}")
+            await self._reply_text(message, f"Falha no /call: {exc}")
             self._record_audit(
                 trace_id=trace_id,
                 event_type="command_end",
@@ -1070,7 +1085,7 @@ class BotHandlers:
             try:
                 limit = max(1, min(50, int(context.args[0])))
             except ValueError:
-                await message.reply_text("Uso: /voip_logs [quantidade]")
+                await self._reply_text(message, "Uso: /voip_logs [quantidade]")
                 return
         self._record_audit(
             trace_id=trace_id,
@@ -1127,7 +1142,7 @@ class BotHandlers:
                 payload={"limit": limit, "returned": len(rows)},
             )
         except Exception as exc:
-            await message.reply_text(f"Falha no /voip_logs: {exc}")
+            await self._reply_text(message, f"Falha no /voip_logs: {exc}")
             self._record_audit(
                 trace_id=trace_id,
                 event_type="command_end",
@@ -1146,19 +1161,19 @@ class BotHandlers:
             return
         message, _, trace_id, automation_context = prepared
         if not context.args or len(context.args) < 2:
-            await message.reply_text(
+            await self._reply_text(message, 
                 "Uso: /note <aba> /<titulo> <texto> ou /note <aba> <texto>"
             )
             return
         raw_tab = context.args[0].strip().lower()
         tab = self._normalize_tab(raw_tab)
         if tab not in {"estudos", "dinheiro", "trabalho", "life", "geral"}:
-            await message.reply_text("Aba invalida. Use: estudos, dinheiro, trabalho, life, geral.")
+            await self._reply_text(message, "Aba invalida. Use: estudos, dinheiro, trabalho, life, geral.")
             return
         target_chat_id = self._note_tab_map.get(tab)
         if target_chat_id is None:
             configured = ", ".join(sorted(self._note_tab_map.keys())) or "(nenhuma)"
-            await message.reply_text(
+            await self._reply_text(message, 
                 f"NOTE_TAB_CHAT_IDS_JSON sem mapeamento para aba '{tab}'. "
                 f"Abas carregadas: {configured}"
             )
@@ -1167,7 +1182,7 @@ class BotHandlers:
         payload = " ".join(context.args[1:]).strip()
         title, body = self._parse_note_payload(payload)
         if not title:
-            await message.reply_text("Nota vazia.")
+            await self._reply_text(message, "Nota vazia.")
             return
         self._record_audit(
             trace_id=trace_id,
@@ -1198,7 +1213,7 @@ class BotHandlers:
                 disable_web_page_preview=True,
             )
         except Exception as exc:
-            await message.reply_text(
+            await self._reply_text(message, 
                 f"Falha ao enviar para aba '{tab}': {exc}\n"
                 "Verifique NOTE_TAB_CHAT_IDS_JSON com IDs reais."
             )
@@ -1228,7 +1243,7 @@ class BotHandlers:
                 target_chat_id=target_chat_id,
                 telegram_message_id=getattr(sent, "message_id", None),
             )
-        await message.reply_text(
+        await self._reply_text(message, 
             f"Nota salva em {tab}. ID: {note_id if note_id is not None else '-'}"
         )
         self._record_audit(
@@ -1249,15 +1264,15 @@ class BotHandlers:
             return
         message, _, trace_id, automation_context = prepared
         if not context.args or len(context.args) < 2:
-            await message.reply_text("Uso: /lembrete HH:MM texto")
+            await self._reply_text(message, "Uso: /lembrete HH:MM texto")
             return
         match = self.TIME_RE.match(context.args[0].strip())
         if not match:
-            await message.reply_text("Horario invalido. Use HH:MM (24h).")
+            await self._reply_text(message, "Horario invalido. Use HH:MM (24h).")
             return
         note_text = " ".join(context.args[1:]).strip()
         if not note_text:
-            await message.reply_text("Texto do lembrete nao informado.")
+            await self._reply_text(message, "Texto do lembrete nao informado.")
             return
         hour = int(match.group(1))
         minute = int(match.group(2))
@@ -1278,7 +1293,7 @@ class BotHandlers:
                 remind_at_utc=remind_utc,
                 timezone_name=self._settings.bot_timezone,
             )
-        await message.reply_text(
+        await self._reply_text(message, 
             "Lembrete salvo para "
             f"{remind_local.strftime('%d/%m/%Y %H:%M')} (ID {reminder_id if reminder_id is not None else '-'})"
         )
@@ -1300,7 +1315,7 @@ class BotHandlers:
             return
         message, _, trace_id, automation_context = prepared
         if self._state_store is None:
-            await message.reply_text("Audit log indisponivel.")
+            await self._reply_text(message, "Audit log indisponivel.")
             return
         args = getattr(context, "args", []) or []
         limit = 20
@@ -1315,7 +1330,7 @@ class BotHandlers:
                     try:
                         limit = max(1, min(100, int(args[1])))
                     except ValueError:
-                        await message.reply_text(
+                        await self._reply_text(message, 
                             "Uso: /logs [quantidade], /logs erro [quantidade], "
                             "/logs ami [quantidade] ou /logs voip [quantidade]"
                         )
@@ -1330,13 +1345,13 @@ class BotHandlers:
                             try:
                                 limit = max(1, min(100, int(args[2])))
                             except ValueError:
-                                await message.reply_text("Uso: /logs ami [quantidade] ou /logs ami erro [quantidade]")
+                                await self._reply_text(message, "Uso: /logs ami [quantidade] ou /logs ami erro [quantidade]")
                                 return
                     else:
                         try:
                             limit = max(1, min(100, int(args[1])))
                         except ValueError:
-                            await message.reply_text("Uso: /logs ami [quantidade] ou /logs ami erro [quantidade]")
+                            await self._reply_text(message, "Uso: /logs ami [quantidade] ou /logs ami erro [quantidade]")
                             return
             elif first == "voip":
                 only_voip = True
@@ -1348,7 +1363,7 @@ class BotHandlers:
                             try:
                                 limit = max(1, min(100, int(args[2])))
                             except ValueError:
-                                await message.reply_text(
+                                await self._reply_text(message, 
                                     "Uso: /logs voip [quantidade] ou /logs voip erro [quantidade]"
                                 )
                                 return
@@ -1356,7 +1371,7 @@ class BotHandlers:
                         try:
                             limit = max(1, min(100, int(args[1])))
                         except ValueError:
-                            await message.reply_text(
+                            await self._reply_text(message, 
                                 "Uso: /logs voip [quantidade] ou /logs voip erro [quantidade]"
                             )
                             return
@@ -1364,7 +1379,7 @@ class BotHandlers:
                 try:
                     limit = max(1, min(100, int(args[0])))
                 except ValueError:
-                    await message.reply_text(
+                    await self._reply_text(message, 
                         "Uso: /logs [quantidade], /logs erro [quantidade], "
                         "/logs ami [quantidade] ou /logs voip [quantidade]"
                     )
@@ -1913,6 +1928,71 @@ class BotHandlers:
             await self._run_single_trigger(update, context, trigger="health")
         elif is_all_command(text, bot_username=bot_username):
             await self.all_handler(update, context)
+        else:
+            url = extract_standalone_url(text)
+            if url is not None:
+                await self._handle_link_summary(update, url)
+
+    async def _handle_link_summary(self, update: Update, url: str) -> None:
+        prepared = await self._prepare_command(update, command="/link")
+        if prepared is None:
+            return
+        message, _, trace_id, automation_context = prepared
+        self._record_audit(
+            trace_id=trace_id,
+            event_type="command_start",
+            command="/link",
+            context=automation_context,
+            status="start",
+            severity="info",
+            payload={"url": url},
+        )
+        try:
+            result = await self._link_summary_provider.summarize_and_save(
+                url,
+                source_label=self._link_source_label(automation_context),
+            )
+            lines = [
+                "<b>Link salvo no Discord</b>",
+                f"URL: {html.escape(result.final_url or result.url)}",
+            ]
+            if result.title:
+                lines.append(f"Titulo: <b>{html.escape(result.title)}</b>")
+            lines.extend(
+                [
+                    "",
+                    "<b>Resumo</b>",
+                    html.escape(result.summary),
+                    "",
+                    "Destino: sites-uteis",
+                ]
+            )
+            await self._reply_chunks(message, "\n".join(lines))
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/link",
+                context=automation_context,
+                status="ok",
+                severity="info",
+                payload={
+                    "url": result.url,
+                    "final_url": result.final_url,
+                    "title": result.title,
+                    "discord_status_code": result.discord_status_code,
+                },
+            )
+        except Exception as exc:
+            await self._reply_text(message, f"Falha ao processar link: {exc}")
+            self._record_audit(
+                trace_id=trace_id,
+                event_type="command_end",
+                command="/link",
+                context=automation_context,
+                status="error",
+                severity="alerta",
+                payload={"url": url, "error": str(exc)},
+            )
 
     async def channel_post_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1963,9 +2043,10 @@ class BotHandlers:
         trace_id = self._new_trace_id()
         if not self._is_allowed_chat(chat.id):
             await self._handle_unauthorized(update, message.text, trace_id)
-            await message.reply_text(self.BLOCKED_MESSAGE)
+            await self._reply_text(message, self.BLOCKED_MESSAGE, mirror=False)
             return None
         automation_context = self._build_context(update, trace_id, command=command)
+        await self._mirror_incoming_command(update)
         if self._state_store is not None and command in {"/voip", "/call", "/ping"}:
             cooldown = (
                 self._settings.rate_limit_voip_seconds
@@ -1977,7 +2058,7 @@ class BotHandlers:
                 rate_key, cooldown
             )
             if not allowed:
-                await message.reply_text(
+                await self._reply_text(message, 
                     f"Rate limit: aguarde {retry_after}s para usar {command} novamente."
                 )
                 self._record_audit(
@@ -2016,15 +2097,15 @@ class BotHandlers:
         )
         results = await self._orchestrator.run_trigger(trigger, automation_context)
         if not results:
-            await message.reply_text(f"Nenhuma automacao registrada para {trigger}.")
+            await self._reply_text(message, f"Nenhuma automacao registrada para {trigger}.")
             return
         for result in results:
             await self._reply_chunks(message, result.message)
 
     async def _send_reminder_overview(self, message: Message, chat_id: int) -> None:
         if self._state_store is None:
-            await message.reply_text("<b>Lembretes de hoje</b>\nSem lembretes.", parse_mode=ParseMode.HTML)
-            await message.reply_text("<b>Lembretes de amanha</b>\nSem lembretes.", parse_mode=ParseMode.HTML)
+            await self._reply_text(message, "<b>Lembretes de hoje</b>\nSem lembretes.", parse_mode=ParseMode.HTML)
+            await self._reply_text(message, "<b>Lembretes de amanha</b>\nSem lembretes.", parse_mode=ParseMode.HTML)
             return
         today = datetime.now(self._tzinfo).date()
         tomorrow = today + timedelta(days=1)
@@ -2067,9 +2148,22 @@ class BotHandlers:
             )
         return "\n".join(lines)
 
+    async def _reply_text(
+        self,
+        message: Message,
+        text: str,
+        *,
+        mirror: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        if self._bridge_notifier is None:
+            await message.reply_text(text, **kwargs)
+            return
+        await self._bridge_notifier.reply(message, text, mirror=mirror, **kwargs)
+
     async def _reply_chunks(self, message: Message, content: str) -> None:
         for chunk in split_message(content):
-            await message.reply_text(
+            await self._reply_text(message,
                 chunk,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
@@ -2117,6 +2211,27 @@ class BotHandlers:
                 payload=None,
             )
 
+    async def _mirror_incoming_command(self, update: Update) -> None:
+        if self._bridge_notifier is None:
+            return
+        message = getattr(update, "effective_message", None)
+        if getattr(message, "bridge_origin", "telegram") != "telegram":
+            return
+        text = getattr(message, "text", None)
+        user = getattr(update, "effective_user", None)
+        username = getattr(user, "username", None)
+        try:
+            await self._bridge_notifier.mirror_incoming_telegram(
+                text=text,
+                username=username,
+            )
+        except Exception:
+            logger.warning(
+                "failed to mirror incoming telegram command",
+                extra={"event": "bridge_incoming_telegram_error"},
+                exc_info=True,
+            )
+
     def _build_context(
         self,
         update: Update,
@@ -2128,6 +2243,9 @@ class BotHandlers:
         chat_id = getattr(chat, "id", None)
         user_id = getattr(user, "id", None)
         username = getattr(user, "username", None)
+        message = getattr(update, "effective_message", None)
+        if getattr(message, "bridge_origin", "telegram") == "discord" and username:
+            username = f"discord:{username}"
         return AutomationContext(
             settings=self._settings,
             trace_id=trace_id,
@@ -2161,6 +2279,22 @@ class BotHandlers:
             severity=severity,
             payload=payload,
         )
+
+    @staticmethod
+    def _link_source_label(context: AutomationContext) -> str:
+        source = "Telegram"
+        username = context.username or ""
+        if username.startswith("discord:"):
+            source = "Discord"
+            username = username[len("discord:") :]
+        parts = []
+        if context.chat_id is not None:
+            parts.append(f"chat_id={context.chat_id}")
+        if context.user_id is not None:
+            parts.append(f"user_id={context.user_id}")
+        if username:
+            parts.append(f"@{username}")
+        return source if not parts else source + " " + " ".join(parts)
 
     def _normalize_tab(self, raw_tab: str) -> str:
         normalized = raw_tab.strip().lower()

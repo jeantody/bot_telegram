@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _read_int(name: str, default: int) -> int:
@@ -18,6 +22,19 @@ def _read_bool(name: str, default: bool) -> bool:
     if raw in {"0", "false", "no", "n", "off"}:
         return False
     return default
+
+
+def _resolve_project_path(raw_path: str) -> str:
+    value = (raw_path or "").strip()
+    if not value:
+        return value
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return str(candidate)
+    project_candidate = PROJECT_ROOT / candidate
+    if project_candidate.exists():
+        return str(project_candidate)
+    return value
 
 
 @dataclass(frozen=True)
@@ -90,7 +107,7 @@ def load_settings_from_env(
 
     settings = VoipProbeSettings(
         enabled=_read_bool("VOIP_PROBE_ENABLED", True),
-        sipp_bin=os.getenv("VOIP_SIPP_BIN", "sipp").strip(),
+        sipp_bin=_resolve_project_path(os.getenv("VOIP_SIPP_BIN", "sipp").strip()),
         sip_server=os.getenv("VOIP_SIP_SERVER", "mvtelecom.ddns.net").strip(),
         sip_port=_read_int("VOIP_SIP_PORT", 5060),
         sip_transport=os.getenv("VOIP_SIP_TRANSPORT", "udp").strip().lower() or "udp",

@@ -5,7 +5,7 @@ from typing import Any
 
 
 _SENSITIVE_KEY_RE = re.compile(
-    r"(password|pass|token|secret|api[_-]?key|authorization|cookie|senha)",
+    r"(password|pass|token|secret|api[_-]?key|authorization|cookie|senha|webhook)",
     re.IGNORECASE,
 )
 
@@ -16,13 +16,17 @@ _TELEGRAM_BOT_TOKEN_URL_RE = re.compile(
 )
 
 _GENERIC_KV_RE = re.compile(
-    r"(?i)\b(token|password|secret|api_key)\s*=\s*([^\s&]+)"
+    r"(?i)\b([A-Z0-9_-]*(?:token|password|secret|api[_-]?key)[A-Z0-9_-]*)\s*=\s*([^\s&]+)"
 )
 _GENERIC_COLON_RE = re.compile(
-    r"(?i)\b(token|password|secret|api_key)\s*:\s*([^\s]+)"
+    r"(?i)\b([A-Z0-9_-]*(?:token|password|secret|api[_-]?key)[A-Z0-9_-]*)\s*:\s*([^\s]+)"
 )
 _AUTH_BEARER_RE = re.compile(
     r"(?i)\b(authorization)\s*:\s*bearer\s+([A-Za-z0-9._\-~+/=]+)"
+)
+_DISCORD_WEBHOOK_URL_RE = re.compile(
+    r"(discord(?:app)?\.com/api/webhooks/\d+/)([A-Za-z0-9._\-]+)",
+    re.IGNORECASE,
 )
 
 
@@ -30,6 +34,7 @@ def redact_text(text: str) -> str:
     if not text:
         return text
     value = _TELEGRAM_BOT_TOKEN_URL_RE.sub(r"\1<redacted>", text)
+    value = _DISCORD_WEBHOOK_URL_RE.sub(r"\1<redacted>", value)
     value = _AUTH_BEARER_RE.sub(r"\1: Bearer <redacted>", value)
     value = _GENERIC_KV_RE.sub(r"\1=<redacted>", value)
     value = _GENERIC_COLON_RE.sub(r"\1: <redacted>", value)

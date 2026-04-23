@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters
 
+from src.bridge import BridgeNotifier
 from src.automations_lib.automations.status_finance import StatusFinanceAutomation
 from src.automations_lib.automations.status_health import StatusHealthAutomation
 from src.automations_lib.automations.status_host import StatusHostAutomation
@@ -20,6 +21,7 @@ from src.automations_lib.providers.weather_provider import WeatherProvider
 from src.automations_lib.providers.zabbix_provider import ZabbixProvider
 from src.automations_lib.registry import AutomationRegistry
 from src.config import Settings
+from src.discord_bridge_service import DiscordBridgeService
 from src.handlers import BotHandlers
 from src.proactive_service import ProactiveService
 from src.reminder_service import ReminderService
@@ -39,6 +41,9 @@ async def _post_init(application: Application) -> None:
     voip_probe = application.bot_data.get("voip_probe_service")
     if voip_probe is not None:
         await voip_probe.start()
+    discord_bridge = application.bot_data.get("discord_bridge_service")
+    if discord_bridge is not None:
+        await discord_bridge.start()
 
 
 async def _post_shutdown(application: Application) -> None:
@@ -51,6 +56,9 @@ async def _post_shutdown(application: Application) -> None:
     voip_probe = application.bot_data.get("voip_probe_service")
     if voip_probe is not None:
         await voip_probe.stop()
+    discord_bridge = application.bot_data.get("discord_bridge_service")
+    if discord_bridge is not None:
+        await discord_bridge.stop()
     state_store = application.bot_data.get("state_store")
     if state_store is not None:
         try:
@@ -76,6 +84,7 @@ async def _error_handler(update, context) -> None:  # pragma: no cover - runtime
 
 def build_application(settings: Settings) -> Application:
     state_store = BotStateStore(settings.state_db_path)
+    bridge_notifier = BridgeNotifier(settings)
     registry = AutomationRegistry()
     registry.register(StatusNewsAutomation(NewsProvider(settings.request_timeout_seconds)))
     registry.register(
@@ -117,6 +126,7 @@ def build_application(settings: Settings) -> Application:
         state_store=state_store,
         voip_provider=voip_provider,
         zabbix_provider=zabbix_provider,
+        bridge_notifier=bridge_notifier,
     )
     builder = (
         ApplicationBuilder()
@@ -125,26 +135,36 @@ def build_application(settings: Settings) -> Application:
         .post_shutdown(_post_shutdown)
     )
     application = builder.build()
+    bridge_notifier.set_telegram_bot(getattr(application, "bot", None))
     proactive_service = ProactiveService(
         application=application,
         settings=settings,
         orchestrator=orchestrator,
         state_store=state_store,
+        bridge_notifier=bridge_notifier,
     )
     reminder_service = ReminderService(
         application=application,
         settings=settings,
         state_store=state_store,
+        bridge_notifier=bridge_notifier,
     )
     voip_probe_service = VoipProbeService(
         application=application,
         settings=settings,
         state_store=state_store,
         provider=voip_provider,
+        bridge_notifier=bridge_notifier,
+    )
+    discord_bridge_service = DiscordBridgeService(
+        settings=settings,
+        handlers=bot_handlers,
+        bridge_notifier=bridge_notifier,
     )
     application.bot_data["proactive_service"] = proactive_service
     application.bot_data["reminder_service"] = reminder_service
     application.bot_data["voip_probe_service"] = voip_probe_service
+    application.bot_data["discord_bridge_service"] = discord_bridge_service
     application.bot_data["state_store"] = state_store
     if zabbix_provider is not None:
         application.bot_data["zabbix_provider"] = zabbix_provider

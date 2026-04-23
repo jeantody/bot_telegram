@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from telegram.constants import ParseMode
 from telegram.ext import Application
 
+from src.bridge import BridgeNotifier
 from src.config import Settings
 from src.state_store import BotStateStore
 
@@ -22,10 +23,12 @@ class ReminderService:
         application: Application,
         settings: Settings,
         state_store: BotStateStore,
+        bridge_notifier: BridgeNotifier | None = None,
     ) -> None:
         self._application = application
         self._settings = settings
         self._state_store = state_store
+        self._bridge_notifier = bridge_notifier
         self._task: asyncio.Task | None = None
         self._tzinfo = _resolve_timezone(settings.bot_timezone)
 
@@ -68,12 +71,20 @@ class ReminderService:
                 f"Texto: {html.escape(text)}"
             )
             try:
-                await self._application.bot.send_message(
-                    chat_id=chat_id,
-                    text=message,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
+                if self._bridge_notifier is not None:
+                    await self._bridge_notifier.send_telegram(
+                        chat_id=chat_id,
+                        text=message,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+                else:
+                    await self._application.bot.send_message(
+                        chat_id=chat_id,
+                        text=message,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
                 self._state_store.mark_reminder_sent(
                     reminder_id=reminder_id,
                     sent_at_utc=datetime.now(timezone.utc),

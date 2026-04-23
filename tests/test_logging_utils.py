@@ -51,3 +51,49 @@ def test_configure_logging_redacts_bearer_authorization(capsys) -> None:
         for handler in old_handlers:
             root_logger.addHandler(handler)
         root_logger.setLevel(old_level)
+
+
+def test_configure_logging_redacts_discord_webhook(capsys) -> None:
+    root_logger = logging.getLogger()
+    old_handlers = list(root_logger.handlers)
+    old_level = root_logger.level
+    try:
+        configure_logging("INFO")
+        logging.getLogger("httpx").info(
+            "HTTP Request: POST https://discord.com/api/webhooks/123456/secret-token"
+        )
+        for handler in logging.getLogger().handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+        captured = capsys.readouterr().out
+        assert "secret-token" not in captured
+        assert "discord.com/api/webhooks/123456/<redacted>" in captured
+    finally:
+        root_logger.handlers.clear()
+        for handler in old_handlers:
+            root_logger.addHandler(handler)
+        root_logger.setLevel(old_level)
+
+
+def test_configure_logging_redacts_named_discord_token(capsys) -> None:
+    root_logger = logging.getLogger()
+    old_handlers = list(root_logger.handlers)
+    old_level = root_logger.level
+    try:
+        configure_logging("INFO")
+        logging.getLogger("bridge").info("DISCORD_BOT_TOKEN=abc.def.secret")
+        for handler in logging.getLogger().handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+        captured = capsys.readouterr().out
+        assert "abc.def.secret" not in captured
+        assert "DISCORD_BOT_TOKEN=<redacted>" in captured
+    finally:
+        root_logger.handlers.clear()
+        for handler in old_handlers:
+            root_logger.addHandler(handler)
+        root_logger.setLevel(old_level)

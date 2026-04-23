@@ -57,6 +57,19 @@ running_pid() {
     pid="$(read_pid || true)"
     if is_pid_alive "$pid"; then
         printf '%s\n' "$pid"
+        return 0
+    fi
+    if command -v pgrep >/dev/null 2>&1; then
+        pid="$(pgrep -f "$DEFAULT_PYTHON -u $MAIN_FILE" | head -n 1 || true)"
+        if is_pid_alive "$pid"; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+        pid="$(pgrep -f "python.*-u $MAIN_FILE" | head -n 1 || true)"
+        if is_pid_alive "$pid"; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
     fi
 }
 
@@ -79,6 +92,7 @@ start_bot() {
     local current_pid interpreter started_pid grace_seconds
     current_pid="$(running_pid || true)"
     if [[ -n "$current_pid" ]]; then
+        printf '%s\n' "$current_pid" > "$PID_FILE"
         echo "Bot ja esta rodando (pid $current_pid)."
         return 0
     fi
@@ -137,12 +151,13 @@ PY
 stop_bot() {
     ensure_runtime_dirs
     local pid timeout elapsed
-    pid="$(read_pid || true)"
+    pid="$(running_pid || true)"
     if ! is_pid_alive "$pid"; then
         rm -f "$PID_FILE"
         echo "Bot nao esta rodando."
         return 0
     fi
+    printf '%s\n' "$pid" > "$PID_FILE"
 
     kill "$pid" 2>/dev/null || true
     timeout="${BOT_STOP_TIMEOUT_SECONDS:-20}"
@@ -179,6 +194,7 @@ status_bot() {
     local pid
     pid="$(running_pid || true)"
     if [[ -n "$pid" ]]; then
+        printf '%s\n' "$pid" > "$PID_FILE"
         echo "Bot rodando (pid $pid)."
     else
         rm -f "$PID_FILE"

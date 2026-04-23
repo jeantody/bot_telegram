@@ -34,10 +34,25 @@ Comandos operacionais locais:
 ./bot status
 ```
 
+Quando `/usr/local/bin/bot` apontar para este script, os mesmos comandos podem
+ser chamados de qualquer diretorio como `bot start`, `bot stop`, `bot logs` e
+`bot restart`. Se o PATH global do host estiver somente leitura, use os
+comandos locais com `./bot`.
+
 O script `bot` cria:
 
 - `data/bot.pid`: PID do processo em background.
 - `logs/bot.log`: stdout/stderr do bot em JSON estruturado.
+
+Funcoes internas do script `bot`:
+
+- `start_bot()`: valida runtime, cria diretorios, inicia `src/main.py` em
+  background, grava PID e mostra o caminho do log.
+- `stop_bot()`: localiza o processo por PID file ou por busca do comando Python,
+  envia `SIGTERM`, aguarda encerramento e usa `SIGKILL` se exceder o timeout.
+- `logs_bot()`: executa `tail -f` em `logs/bot.log`, com quantidade inicial
+  opcional de linhas.
+- `status_bot()`: sincroniza `data/bot.pid` e mostra se o processo esta rodando.
 
 Variaveis aceitas pelo script:
 
@@ -83,6 +98,9 @@ Comandos utilitarios:
 - `/note <aba> /<titulo> <texto>`: envia anotacao para chat configurado.
 - `/lembrete HH:MM texto`: agenda lembrete no timezone do bot.
 - `/logs [filtro] [quantidade]`: consulta auditoria no SQLite.
+- Link sozinho `http/https`: faz scraping leve, resume com Ollama/Gemma e salva no Discord `sites-uteis`.
+- Ponte Discord opcional: mensagens de comando/link no canal configurado entram no
+  mesmo roteamento do Telegram; respostas do bot sao espelhadas nos dois canais.
 
 Filtros uteis de `/logs`:
 
@@ -116,6 +134,8 @@ Grupos de variaveis:
 - VoIP/SIPp: `VOIP_*`.
 - Issabel/Asterisk: `ISSABEL_AMI_*`.
 - Zabbix: `ZABBIX_BASE_URL`, `ZABBIX_API_TOKEN`, `ZABBIX_TIMEOUT_SECONDS`, `ZABBIXH_HOST_TARGETS_JSON`.
+- Resumo de links: `LINK_SUMMARY_OLLAMA_BASE_URL`, `LINK_SUMMARY_OLLAMA_MODEL`, `LINK_SUMMARY_DISCORD_WEBHOOK_URL`, `LINK_SUMMARY_TIMEOUT_SECONDS`, `LINK_SUMMARY_MAX_TEXT_CHARS`.
+- Ponte Discord: `DISCORD_BRIDGE_ENABLED`, `DISCORD_BOT_TOKEN`, `DISCORD_BRIDGE_WEBHOOK_URL`, `DISCORD_BRIDGE_CHANNEL_ID`.
 - Rate limit: `RATE_LIMIT_PING_SECONDS`, `RATE_LIMIT_VOIP_SECONDS`.
 
 Observacoes importantes:
@@ -143,6 +163,9 @@ Fontes principais:
 - Zabbix API JSON-RPC quando configurado.
 - Issabel/Asterisk por Rawman HTTP ou AMI TCP/TLS.
 - SIPp para probes VoIP em `tools/voip_probe/`.
+- Ollama `/api/generate` para resumo de links e Discord webhook para arquivar em `sites-uteis`.
+- Discord Gateway via `discord.py` para ler a sala configurada e webhook Discord
+  separado para publicar mensagens espelhadas da ponte.
 
 ## Estado, Auditoria e Logs
 
@@ -208,6 +231,15 @@ Gates focados:
 ```
 
 Sempre rode pelo menos os testes de configuracao e roteamento quando alterar `.env.example`, `src/config.py`, `src/telegram_app.py` ou `src/handlers.py`.
+
+Para qualquer alteracao no resumo automatico de links, rode tambem o gate TDD obrigatorio:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_link_summary_provider.py tests/test_command_router.py tests/test_config_loading.py tests/test_logging_utils.py
+RUN_LINK_SUMMARY_LIVE_TESTS=1 .venv/bin/python -m pytest -q tests/test_link_summary_live.py
+```
+
+O teste live usa o `.env` real, chama o Ollama configurado e publica no webhook do Discord.
 
 ## Manutencao
 

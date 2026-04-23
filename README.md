@@ -8,6 +8,14 @@ Bot em Python para executar automações pelo Telegram com arquitetura separada 
 - Comando `status` e `/status`
 - Comando `/host` para monitoramento de infraestrutura (Locaweb, Meta e Cisco Umbrella)
 - Comando `/zabbixh` para consultar metricas de hosts configurados no Zabbix
+- Resumo automatico de link enviado sozinho no Telegram:
+  - faz scraping leve da pagina
+  - resume com Ollama/Gemma
+  - salva no Discord via webhook configurado
+- Ponte Telegram/Discord opcional:
+  - le comandos e links no canal Discord configurado
+  - replica mensagens que acionam o bot e respostas entre Telegram e Discord
+  - usa um webhook separado para publicar na sala Discord da ponte
 - Comando `/health` para latencia e falhas por fonte
 - Comando `/all` para executar `status`, `/host` e listar lembretes de hoje/amanha
 - Comandos utilitarios:
@@ -79,6 +87,24 @@ Exemplo seguro de `ZABBIXH_HOST_TARGETS_JSON`:
 
 Esse campo existe para permitir inclusao, exclusao e edicao de hosts monitorados sem alterar codigo. O comando `/zabbixh` usa os `hostids` configurados nesse JSON e tenta resolver, para cada host, CPU, memoria, uptime e uso do disco `/`.
 
+### Variaveis de resumo de links
+- `LINK_SUMMARY_OLLAMA_BASE_URL`: URL base do Ollama, por exemplo `http://192.168.0.14:11434`
+- `LINK_SUMMARY_OLLAMA_MODEL`: modelo usado no `/api/generate`, por exemplo `gemma4:e2b`
+- `LINK_SUMMARY_DISCORD_WEBHOOK_URL`: webhook do Discord da sala `sites-uteis`; deve existir apenas no `.env`
+- `LINK_SUMMARY_TIMEOUT_SECONDS`: timeout de scraping, Ollama e Discord
+- `LINK_SUMMARY_MAX_TEXT_CHARS`: limite de texto extraido enviado ao modelo
+
+O bot processa apenas mensagens autorizadas cujo conteudo seja um unico link `http://` ou `https://`. Textos com link embutido sao ignorados.
+
+### Variaveis da ponte Discord
+- `DISCORD_BRIDGE_ENABLED`: habilita a ponte bidirecional Telegram/Discord
+- `DISCORD_BOT_TOKEN`: token do bot Discord; exige Message Content Intent habilitado
+- `DISCORD_BRIDGE_WEBHOOK_URL`: webhook da sala Discord usada pela ponte
+- `DISCORD_BRIDGE_CHANNEL_ID`: opcional; quando vazio, o bot tenta resolver pelo webhook
+
+O webhook de `DISCORD_BRIDGE_WEBHOOK_URL` e separado de `LINK_SUMMARY_DISCORD_WEBHOOK_URL`.
+O primeiro serve para a sala unica Telegram/Discord; o segundo arquiva links uteis.
+
 ## Executar
 ```bash
 .venv/bin/python src/main.py
@@ -96,6 +122,17 @@ Para alteracoes no Zabbix, o gate minimo recomendado e:
 .venv/bin/python -m pytest -q tests/test_command_router.py tests/test_telegram_app.py tests/test_config_loading.py
 ```
 
+Para alteracoes no resumo de links, o gate TDD obrigatorio inclui os testes unitarios
+e o teste live contra Ollama/Discord:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_link_summary_provider.py tests/test_command_router.py tests/test_config_loading.py tests/test_logging_utils.py
+RUN_LINK_SUMMARY_LIVE_TESTS=1 .venv/bin/python -m pytest -q tests/test_link_summary_live.py
+```
+
+O teste live publica uma mensagem de validacao no Discord configurado e falha se o
+modelo Ollama nao conseguir gerar resposta.
+
 ## Observacoes de seguranca
 - Nao versione `.env`
 - Mantenha o token apenas no `.env`
@@ -108,7 +145,8 @@ Para alteracoes no Zabbix, o gate minimo recomendado e:
 python tools/voip_probe/main.py run-once --json
 python tools/voip_probe/main.py logs --limit 5 --json
 ```
-- Pre-requisito: `sipp` instalado no host de execucao.
+- Pre-requisito: `VOIP_SIPP_BIN=bin/sipp` usa o SIPp empacotado no projeto;
+  instale `sipp` globalmente apenas se quiser usar `VOIP_SIPP_BIN=sipp`.
 
 ## Diagnostico rapido
 Se `python src/main.py` falhar nesta maquina, verifique primeiro:

@@ -19,6 +19,7 @@ from src.automations_lib.providers.voip_probe_provider import (
     VoipProbeLogEntry,
     VoipProbeResult,
 )
+from src.automations_lib.providers.link_summary_provider import LinkSummaryResult
 from src.automations_lib.providers.zabbix_provider import (
     ZabbixHostMetricsSnapshot,
     ZabbixMetricValue,
@@ -302,6 +303,37 @@ class FakeZabbixProviderRunError:
         raise RuntimeError("zabbix api unavailable")
 
 
+class FakeLinkSummaryProvider:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+
+    async def summarize_and_save(
+        self,
+        url: str,
+        *,
+        source_label: str | None = None,
+    ) -> LinkSummaryResult:
+        self.calls.append((url, source_label))
+        return LinkSummaryResult(
+            url=url,
+            final_url=url,
+            title="Pagina de teste",
+            summary="Resumo curto da pagina.",
+            discord_status_code=204,
+        )
+
+
+class FakeLinkSummaryProviderError:
+    async def summarize_and_save(
+        self,
+        url: str,
+        *,
+        source_label: str | None = None,
+    ) -> LinkSummaryResult:
+        del url, source_label
+        raise RuntimeError("ollama indisponivel")
+
+
 def build_settings(allowed_chat_id: int | None) -> Settings:
     return Settings(
         telegram_bot_token="token",
@@ -531,6 +563,80 @@ async def test_status_text_sends_four_messages() -> None:
 
     assert orchestrator.called_triggers == ["status"]
     assert [r["text"] for r in update.message.replies] == ["m1", "m2", "m3", "m4"]
+
+
+@pytest.mark.asyncio
+async def test_text_handler_processes_standalone_link() -> None:
+    orchestrator = FakeOrchestrator({})
+    provider = FakeLinkSummaryProvider()
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        link_summary_provider=provider,  # type: ignore[arg-type]
+    )
+    update = FakeUpdate(text="https://example.com/docs", chat_id=123)
+
+    await handlers.text_handler(update, FakeContext())
+
+    assert provider.calls == [
+        ("https://example.com/docs", "Telegram chat_id=123")
+    ]
+    combined = "\n".join(item["text"] for item in update.message.replies)
+    assert "Link salvo no Discord" in combined
+    assert "Resumo curto da pagina." in combined
+    assert "sites-uteis" in combined
+
+
+@pytest.mark.asyncio
+async def test_text_handler_ignores_embedded_link() -> None:
+    orchestrator = FakeOrchestrator({})
+    provider = FakeLinkSummaryProvider()
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        link_summary_provider=provider,  # type: ignore[arg-type]
+    )
+    update = FakeUpdate(text="veja https://example.com/docs", chat_id=123)
+
+    await handlers.text_handler(update, FakeContext())
+
+    assert provider.calls == []
+    assert update.message.replies == []
+
+
+@pytest.mark.asyncio
+async def test_text_handler_link_blocks_unauthorized_chat() -> None:
+    orchestrator = FakeOrchestrator({})
+    provider = FakeLinkSummaryProvider()
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        link_summary_provider=provider,  # type: ignore[arg-type]
+    )
+    update = FakeUpdate(text="https://example.com/docs", chat_id=999)
+
+    await handlers.text_handler(update, FakeContext())
+
+    assert provider.calls == []
+    assert any("Acesso nao autorizado" in item["text"] for item in update.message.replies)
+
+
+@pytest.mark.asyncio
+async def test_text_handler_link_reports_provider_error() -> None:
+    orchestrator = FakeOrchestrator({})
+    handlers = BotHandlers(
+        settings=build_settings(allowed_chat_id=123),
+        orchestrator=orchestrator,
+        link_summary_provider=FakeLinkSummaryProviderError(),  # type: ignore[arg-type]
+    )
+    update = FakeUpdate(text="https://example.com/docs", chat_id=123)
+
+    await handlers.text_handler(update, FakeContext())
+
+    assert any(
+        "Falha ao processar link: ollama indisponivel" in item["text"]
+        for item in update.message.replies
+    )
 
 
 @pytest.mark.asyncio

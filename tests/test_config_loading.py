@@ -50,6 +50,15 @@ def test_load_settings_applies_defaults_and_normalizes_ami(monkeypatch) -> None:
         "ZABBIX_API_TOKEN",
         "ZABBIX_TIMEOUT_SECONDS",
         "ZABBIXH_HOST_TARGETS_JSON",
+        "LINK_SUMMARY_OLLAMA_BASE_URL",
+        "LINK_SUMMARY_OLLAMA_MODEL",
+        "LINK_SUMMARY_DISCORD_WEBHOOK_URL",
+        "LINK_SUMMARY_TIMEOUT_SECONDS",
+        "LINK_SUMMARY_MAX_TEXT_CHARS",
+        "DISCORD_BRIDGE_ENABLED",
+        "DISCORD_BOT_TOKEN",
+        "DISCORD_BRIDGE_WEBHOOK_URL",
+        "DISCORD_BRIDGE_CHANNEL_ID",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -72,6 +81,15 @@ def test_load_settings_applies_defaults_and_normalizes_ami(monkeypatch) -> None:
     assert settings.zabbix_api_token is None
     assert settings.zabbix_timeout_seconds == 8
     assert settings.zabbixh_host_targets == ()
+    assert settings.link_summary_ollama_base_url == "http://192.168.0.14:11434"
+    assert settings.link_summary_ollama_model == "gemma4:e2b"
+    assert settings.link_summary_discord_webhook_url == ""
+    assert settings.link_summary_timeout_seconds == 30
+    assert settings.link_summary_max_text_chars == 6000
+    assert settings.discord_bridge_enabled is False
+    assert settings.discord_bot_token == ""
+    assert settings.discord_bridge_webhook_url == ""
+    assert settings.discord_bridge_channel_id is None
     assert settings.state_db_path == str(Path(__file__).resolve().parent.parent / "data/bot_state.db")
     assert settings.voip_results_db_path == str(Path(__file__).resolve().parent.parent / "data/voip_probe.db")
     assert settings.issabel_ami_rawman_url == (
@@ -171,4 +189,67 @@ def test_load_settings_rejects_invalid_zabbixh_targets_json(monkeypatch) -> None
     monkeypatch.setenv("ZABBIXH_HOST_TARGETS_JSON", '{"label":"server"}')
 
     with pytest.raises(ValueError, match="Invalid ZABBIXH_HOST_TARGETS_JSON"):
+        config_module.load_settings()
+
+
+def test_load_settings_accepts_link_summary_configuration(monkeypatch) -> None:
+    monkeypatch.setattr(config_module, "validate_env_contract", lambda: None)
+    monkeypatch.setattr(config_module, "load_dotenv", lambda **kwargs: None)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("LINK_SUMMARY_OLLAMA_BASE_URL", "http://ollama.local:11434")
+    monkeypatch.setenv("LINK_SUMMARY_OLLAMA_MODEL", "gemma4:e2b")
+    monkeypatch.setenv(
+        "LINK_SUMMARY_DISCORD_WEBHOOK_URL",
+        "https://discord.com/api/webhooks/1/token",
+    )
+    monkeypatch.setenv("LINK_SUMMARY_TIMEOUT_SECONDS", "17")
+    monkeypatch.setenv("LINK_SUMMARY_MAX_TEXT_CHARS", "1234")
+
+    settings = config_module.load_settings()
+
+    assert settings.link_summary_ollama_base_url == "http://ollama.local:11434"
+    assert settings.link_summary_ollama_model == "gemma4:e2b"
+    assert settings.link_summary_discord_webhook_url == (
+        "https://discord.com/api/webhooks/1/token"
+    )
+    assert settings.link_summary_timeout_seconds == 17
+    assert settings.link_summary_max_text_chars == 1234
+
+
+def test_load_settings_accepts_discord_bridge_configuration(monkeypatch) -> None:
+    monkeypatch.setattr(config_module, "validate_env_contract", lambda: None)
+    monkeypatch.setattr(config_module, "load_dotenv", lambda **kwargs: None)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_ID", "123")
+    monkeypatch.setenv("DISCORD_BRIDGE_ENABLED", "true")
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "discord-token")
+    monkeypatch.setenv(
+        "DISCORD_BRIDGE_WEBHOOK_URL",
+        "https://discord.com/api/webhooks/1/token",
+    )
+    monkeypatch.setenv("DISCORD_BRIDGE_CHANNEL_ID", "456")
+
+    settings = config_module.load_settings()
+
+    assert settings.discord_bridge_enabled is True
+    assert settings.discord_bot_token == "discord-token"
+    assert settings.discord_bridge_webhook_url == (
+        "https://discord.com/api/webhooks/1/token"
+    )
+    assert settings.discord_bridge_channel_id == 456
+
+
+def test_load_settings_rejects_enabled_discord_bridge_without_token(monkeypatch) -> None:
+    monkeypatch.setattr(config_module, "validate_env_contract", lambda: None)
+    monkeypatch.setattr(config_module, "load_dotenv", lambda **kwargs: None)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_ID", "123")
+    monkeypatch.setenv("DISCORD_BRIDGE_ENABLED", "true")
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+    monkeypatch.setenv(
+        "DISCORD_BRIDGE_WEBHOOK_URL",
+        "https://discord.com/api/webhooks/1/token",
+    )
+
+    with pytest.raises(ValueError, match="Incomplete Discord bridge configuration"):
         config_module.load_settings()
