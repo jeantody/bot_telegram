@@ -4,12 +4,20 @@ import json
 
 import httpx
 import pytest
+from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
-from src.bridge import BridgeDeliveryError, BridgeNotifier, discord_text_from_telegram_html
+from src.bridge import (
+    BridgeDeliveryError,
+    BridgeNotifier,
+    discord_text_from_telegram_html,
+)
 from src.config import Settings
 
 
 class FakeTelegramMessage:
+    bridge_origin = "telegram"
+
     def __init__(self) -> None:
         self.replies: list[dict] = []
 
@@ -23,6 +31,26 @@ class FakeTelegramBot:
 
     async def send_message(self, **kwargs) -> None:
         self.messages.append(kwargs)
+
+
+class FakeDiscordOriginMessage(FakeTelegramMessage):
+    bridge_origin = "discord"
+
+
+class FailingTelegramBot(FakeTelegramBot):
+    async def send_message(self, **kwargs) -> None:
+        self.messages.append(kwargs)
+        raise RuntimeError("telegram boom")
+
+
+class TelegramBotWithHtmlFallback(FakeTelegramBot):
+    async def send_message(self, **kwargs) -> None:
+        self.messages.append(kwargs)
+        if len(self.messages) == 1:
+            raise BadRequest(
+                "Can't parse entities: can't find end tag corresponding to start tag "
+                '"i"'
+            )
 
 
 def build_settings(**kwargs) -> Settings:
@@ -112,6 +140,31 @@ async def test_reply_from_telegram_keeps_local_reply_when_discord_fails(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_reply_from_discord_keeps_response_when_telegram_mirror_fails(
+    monkeypatch,
+) -> None:
+    seen_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_payloads.append(json.loads(request.read().decode("utf-8")))
+        return httpx.Response(204, request=request)
+
+    monkeypatch.setattr(
+        "src.bridge.httpx.AsyncClient",
+        _make_async_client_factory(handler),
+    )
+    bot = FailingTelegramBot()
+    notifier = BridgeNotifier(build_settings())
+    notifier.set_telegram_bot(bot)
+    message = FakeDiscordOriginMessage()
+
+    await notifier.reply(message, "<b>OK</b>", parse_mode=ParseMode.HTML)
+
+    assert seen_payloads == [{"content": "**OK**", "allowed_mentions": {"parse": []}}]
+    assert bot.messages[0]["text"] == "<b>OK</b>"
+
+
+@pytest.mark.asyncio
 async def test_send_discord_plain_splits_large_payload(monkeypatch) -> None:
     seen_payloads: list[dict] = []
 
@@ -142,6 +195,29 @@ async def test_send_telegram_requires_bot_and_chat_id() -> None:
     notifier.set_telegram_bot(FakeTelegramBot())
     with pytest.raises(BridgeDeliveryError, match="Telegram chat_id indisponivel"):
         await notifier.send_telegram(chat_id=None, text="oi")
+
+
+@pytest.mark.asyncio
+async def test_send_telegram_retries_invalid_html_as_plain_text() -> None:
+    bot = TelegramBotWithHtmlFallback()
+    notifier = BridgeNotifier(build_settings())
+    notifier.set_telegram_bot(bot)
+
+    await notifier.send_telegram(
+        chat_id=123,
+        text='<i>\nHackread Hoje\n<a href="https://example.com/?q=1&amp;x=2">Link</a>',
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        mirror=False,
+    )
+
+    assert len(bot.messages) == 2
+    assert bot.messages[0]["parse_mode"] == ParseMode.HTML
+    assert bot.messages[1] == {
+        "chat_id": 123,
+        "text": "Hackread Hoje\nLink (https://example.com/?q=1&x=2)",
+        "disable_web_page_preview": True,
+    }
 
 
 @pytest.mark.asyncio

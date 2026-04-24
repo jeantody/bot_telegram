@@ -15,3 +15,13 @@ def test_split_message_prefers_newline_boundaries() -> None:
 
 def test_split_message_falls_back_to_hard_cut_without_newline() -> None:
     assert split_message("abcdefghij", max_length=4) == ["abcd", "efgh", "ij"]
+
+
+def test_split_message_uses_earlier_line_to_keep_simple_html_balanced() -> None:
+    text = "ok\n<i>\nHackread Hoje\n</i>\nresto"
+
+    assert split_message(text, max_length=22) == [
+        "ok",
+        "<i>\nHackread Hoje\n</i>",
+        "resto",
+    ]

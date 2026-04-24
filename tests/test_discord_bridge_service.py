@@ -116,6 +116,51 @@ class FakeOrchestrator:
         ]
 
 
+class FakeLongStatusOrchestrator:
+    def __init__(self) -> None:
+        self.called_triggers: list[str] = []
+
+    async def run_trigger(self, trigger: str, context) -> list[AutomationResult]:
+        del context
+        self.called_triggers.append(trigger)
+        return [
+            AutomationResult(
+                title="Status A",
+                message=_long_status_message("status-a"),
+                source_label="status",
+                generated_at=datetime.now(timezone.utc),
+                ok=True,
+                severity="info",
+            ),
+            AutomationResult(
+                title="Status B",
+                message=_long_status_message("status-b"),
+                source_label="status",
+                generated_at=datetime.now(timezone.utc),
+                ok=True,
+                severity="info",
+            ),
+        ]
+
+
+class FailingOnceTelegramBot(FakeTelegramBot):
+    def __init__(self, *, fail_on_call: int) -> None:
+        super().__init__()
+        self._fail_on_call = fail_on_call
+
+    async def send_message(self, **kwargs) -> None:
+        self.messages.append(kwargs)
+        if len(self.messages) == self._fail_on_call:
+            raise RuntimeError("telegram mirror failed")
+
+
+def _long_status_message(label: str) -> str:
+    lines = [f"<b>{label}</b>"]
+    for idx in range(1, 8):
+        lines.append(f"{label}-payload-{idx} " + ("x" * 650))
+    return "\n".join(lines)
+
+
 def build_settings(**kwargs) -> Settings:
     base = dict(
         telegram_bot_token="token",
@@ -208,6 +253,53 @@ async def test_discord_status_message_runs_handler_and_bridges_both_sides(monkey
     assert telegram_bot.messages[0]["text"] == "<b>Discord @ana</b>\nstatus"
     assert telegram_bot.messages[1]["text"] == "<b>Status</b>\nTudo OK"
     assert webhook_payloads == [{"content": "**Status**\nTudo OK", "allowed_mentions": {"parse": []}}]
+
+
+@pytest.mark.asyncio
+async def test_discord_status_continues_discord_payloads_when_telegram_mirror_fails(
+    monkeypatch,
+) -> None:
+    webhook_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        webhook_payloads.append(json.loads(request.read().decode("utf-8")))
+        return httpx.Response(204, request=request)
+
+    monkeypatch.setattr(
+        "src.bridge.httpx.AsyncClient",
+        _make_async_client_factory(handler),
+    )
+    settings = build_settings()
+    notifier = BridgeNotifier(settings)
+    telegram_bot = FailingOnceTelegramBot(fail_on_call=2)
+    notifier.set_telegram_bot(telegram_bot)
+    orchestrator = FakeLongStatusOrchestrator()
+    handlers = BotHandlers(
+        settings=settings,
+        orchestrator=orchestrator,  # type: ignore[arg-type]
+        bridge_notifier=notifier,
+    )
+    service = DiscordBridgeService(
+        settings=settings,
+        handlers=handlers,
+        bridge_notifier=notifier,
+    )
+
+    await service._on_discord_message(
+        FakeDiscordMessage(
+            content="status",
+            channel=FakeChannel(id=456),
+            author=FakeAuthor(id=999, name="ana"),
+        ),
+        FakeDiscordClient(user=FakeDiscordUser(id=111, name="bot")),
+    )
+
+    joined_payloads = "\n".join(payload["content"] for payload in webhook_payloads)
+    assert orchestrator.called_triggers == ["status"]
+    assert len(webhook_payloads) > 2
+    assert "status-a-payload-7" in joined_payloads
+    assert "status-b-payload-7" in joined_payloads
+    assert len(telegram_bot.messages) > 2
 
 
 @pytest.mark.asyncio

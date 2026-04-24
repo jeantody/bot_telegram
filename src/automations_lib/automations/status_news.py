@@ -30,19 +30,19 @@ class StatusNewsAutomation:
     def _format_message(self, bundle: NewsBundle) -> str:
         sections = [
             "<b>Noticias</b>",
-            "<i>Top 10 Tecnoblog\n</i>",
+            "<i>Top 10 Tecnoblog</i>",
             self._to_links(bundle.tecnoblog),
-            "<i>\nTop 10 Mais Populares Tecnoblog\n</i>",
+            "<i>Top 10 Mais Populares Tecnoblog</i>",
             self._to_links(bundle.tecnoblog_popular),
-            "<i>\nHackread Hoje\n</i>",
+            "<i>Hackread Hoje</i>",
             self._to_links(bundle.hackread_today),
-            "<i>\nHackread Ontem\n</i>",
+            "<i>Hackread Ontem</i>",
             self._to_links(bundle.hackread_yesterday),
-            "<i>\nUltimas 5 BoletimSec\n</i>",
+            "<i>Ultimas 5 BoletimSec</i>",
             self._to_links(bundle.boletimsec),
-            "<i>\nTop 10 G1\n</i>",
+            "<i>Top 10 G1</i>",
             self._to_links(bundle.g1),
-            "<i>\nTop 10 TecMundo\n</i>",
+            "<i>Top 10 TecMundo</i>",
             self._to_links(bundle.tecmundo),
         ]
         return "\n".join(sections)

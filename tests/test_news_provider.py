@@ -221,6 +221,35 @@ def test_status_news_format_shows_sections_in_requested_order() -> None:
     assert message.index("Top 10 G1") < message.index("Top 10 TecMundo")
 
 
+def test_status_news_format_escapes_links_and_keeps_section_headers_inline() -> None:
+    automation = StatusNewsAutomation(provider=object())  # type: ignore[arg-type]
+
+    message = automation._format_message(  # noqa: SLF001
+        NewsBundle(
+            tecnoblog=[
+                NewsItem(
+                    title='Titulo <perigoso> & "aspas"',
+                    link='https://example.com/?q=<x>&name="ana"',
+                )
+            ],
+            tecnoblog_popular=[],
+            hackread_today=[],
+            hackread_yesterday=[],
+            boletimsec=[],
+            g1=[],
+            tecmundo=[],
+        )
+    )
+
+    assert "<i>\n" not in message
+    assert "\n</i>" not in message
+    assert "<i>Hackread Hoje</i>" in message
+    assert (
+        '<a href="https://example.com/?q=&lt;x&gt;&amp;name=&quot;ana&quot;">'
+        "Titulo &lt;perigoso&gt; &amp; &quot;aspas&quot;</a>"
+    ) in message
+
+
 def test_status_news_format_shows_sem_itens_quando_fonte_fica_vazia() -> None:
     automation = StatusNewsAutomation(provider=object())  # type: ignore[arg-type]
 

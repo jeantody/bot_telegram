@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
 from src.config import Settings
 from src.message_utils import split_message
@@ -45,6 +46,29 @@ def discord_text_from_telegram_html(value: str) -> str:
     return text.strip()
 
 
+def plain_text_from_telegram_html(value: str) -> str:
+    text = value or ""
+    text = re.sub(
+        r"<\s*a\s+[^>]*href=[\"']([^\"']+)[^>]*>(.*?)<\s*/\s*a\s*>",
+        r"\2 (\1)",
+        text,
+        flags=re.I | re.S,
+    )
+    text = re.sub(r"<\s*br\s*/?\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    return text.strip()
+
+
+def _is_html_parse_mode(value: Any) -> bool:
+    return str(value or "").upper() == ParseMode.HTML
+
+
+def _is_html_parse_error(exc: BadRequest) -> bool:
+    message = str(exc).lower()
+    return "can't parse entities" in message or "can't find end tag" in message
+
+
 class BridgeNotifier:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -78,15 +102,22 @@ class BridgeNotifier:
         if origin == "discord":
             await self._safe_send_discord(text)
             if mirror:
-                await self.send_telegram(
-                    chat_id=self._settings.telegram_allowed_chat_id,
-                    text=text,
-                    mirror=False,
-                    **telegram_kwargs,
-                )
+                try:
+                    await self.send_telegram(
+                        chat_id=self._settings.telegram_allowed_chat_id,
+                        text=text,
+                        mirror=False,
+                        **telegram_kwargs,
+                    )
+                except Exception:
+                    logger.warning(
+                        "telegram bridge mirror failed for discord response",
+                        extra={"event": "telegram_bridge_mirror_error"},
+                        exc_info=True,
+                    )
             return
 
-        await message.reply_text(text, **telegram_kwargs)
+        await self._reply_telegram_message(message, text, **telegram_kwargs)
         if mirror:
             await self._safe_send_discord(text)
 
@@ -102,7 +133,7 @@ class BridgeNotifier:
             raise BridgeDeliveryError("Telegram bot indisponivel para ponte.")
         if chat_id is None:
             raise BridgeDeliveryError("Telegram chat_id indisponivel para ponte.")
-        await self._telegram_bot.send_message(chat_id=chat_id, text=text, **kwargs)
+        await self._send_telegram_message(chat_id=chat_id, text=text, **kwargs)
         if mirror:
             await self._safe_send_discord(text)
 
@@ -142,13 +173,82 @@ class BridgeNotifier:
         if not self.telegram_output_enabled:
             return
         source = f"Discord @{username}" if username else "Discord"
-        await self.send_telegram(
-            chat_id=self._settings.telegram_allowed_chat_id,
-            text=f"<b>{html.escape(source)}</b>\n{html.escape(text)}",
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-            mirror=False,
+        try:
+            await self.send_telegram(
+                chat_id=self._settings.telegram_allowed_chat_id,
+                text=f"<b>{html.escape(source)}</b>\n{html.escape(text)}",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                mirror=False,
+            )
+        except Exception:
+            logger.warning(
+                "failed to mirror incoming discord message to telegram",
+                extra={"event": "bridge_incoming_discord_error"},
+                exc_info=True,
+            )
+
+    async def _reply_telegram_message(
+        self,
+        message: Any,
+        text: str,
+        **kwargs: Any,
+    ) -> None:
+        try:
+            await message.reply_text(text, **kwargs)
+        except BadRequest as exc:
+            if not self._should_retry_telegram_plain(kwargs, exc):
+                raise
+            fallback_kwargs = self._plain_text_kwargs(kwargs)
+            logger.warning(
+                "telegram reply html parse failed; retrying as plain text",
+                extra={"event": "telegram_reply_html_fallback"},
+                exc_info=True,
+            )
+            await message.reply_text(
+                plain_text_from_telegram_html(text),
+                **fallback_kwargs,
+            )
+
+    async def _send_telegram_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        **kwargs: Any,
+    ) -> None:
+        try:
+            await self._telegram_bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                **kwargs,
+            )
+        except BadRequest as exc:
+            if not self._should_retry_telegram_plain(kwargs, exc):
+                raise
+            fallback_kwargs = self._plain_text_kwargs(kwargs)
+            logger.warning(
+                "telegram send html parse failed; retrying as plain text",
+                extra={"event": "telegram_send_html_fallback"},
+                exc_info=True,
+            )
+            await self._telegram_bot.send_message(
+                chat_id=chat_id,
+                text=plain_text_from_telegram_html(text),
+                **fallback_kwargs,
+            )
+
+    @staticmethod
+    def _should_retry_telegram_plain(kwargs: dict[str, Any], exc: BadRequest) -> bool:
+        return _is_html_parse_mode(kwargs.get("parse_mode")) and _is_html_parse_error(
+            exc
         )
+
+    @staticmethod
+    def _plain_text_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs.pop("parse_mode", None)
+        return fallback_kwargs
 
     async def _post_discord_webhook(self, content: str) -> None:
         payload = {
