@@ -102,7 +102,9 @@ Comandos utilitarios:
 - `/note <aba> /<titulo> <texto>`: envia anotacao para chat configurado.
 - `/lembrete HH:MM texto`: agenda lembrete no timezone do bot.
 - `/logs [filtro] [quantidade]`: consulta auditoria no SQLite.
-- Link sozinho `http/https`: faz scraping leve, resume com Ollama/Gemma e salva no Discord `sites-uteis`.
+- Link sozinho `http/https`: faz scraping leve, enriquece contexto de repositorio
+  GitHub com README quando aplicavel, resume com Gemma4 remoto via Ollama e salva
+  no Discord `sites-uteis`.
 - Ponte Discord opcional: mensagens de comando/link no canal configurado entram no
   mesmo roteamento do Telegram; respostas do bot sao espelhadas nos dois canais.
 
@@ -117,6 +119,8 @@ Filtros uteis de `/logs`:
 ## Controle de Acesso
 
 `TELEGRAM_ALLOWED_CHAT_ID` restringe o uso do bot a um chat. Quando vazio, o bot nao restringe por chat. Tentativas nao autorizadas sao registradas em `unauthorized_attempts` pelo `BotStateStore`.
+
+Quando `DISCORD_BRIDGE_ENABLED=true`, `TELEGRAM_ALLOWED_CHAT_ID` passa a ser obrigatorio para espelhar mensagens entre Discord e Telegram.
 
 O comando `/note` usa `NOTE_TAB_CHAT_IDS_JSON` para mapear abas para chats de destino. Alias existente: `estudo` aponta para `estudos`.
 
@@ -138,7 +142,7 @@ Grupos de variaveis:
 - VoIP/SIPp: `VOIP_*`.
 - Issabel/Asterisk: `ISSABEL_AMI_*`.
 - Zabbix: `ZABBIX_BASE_URL`, `ZABBIX_API_TOKEN`, `ZABBIX_TIMEOUT_SECONDS`, `ZABBIXH_HOST_TARGETS_JSON`.
-- Resumo de links: `LINK_SUMMARY_OLLAMA_BASE_URL`, `LINK_SUMMARY_OLLAMA_MODEL`, `LINK_SUMMARY_DISCORD_WEBHOOK_URL`, `LINK_SUMMARY_TIMEOUT_SECONDS`, `LINK_SUMMARY_MAX_TEXT_CHARS`.
+- Resumo de links (Gemma4 remoto): `LINK_SUMMARY_OLLAMA_BASE_URL`, `LINK_SUMMARY_OLLAMA_MODEL`, `LINK_SUMMARY_DISCORD_WEBHOOK_URL`, `LINK_SUMMARY_TIMEOUT_SECONDS`, `LINK_SUMMARY_MAX_TEXT_CHARS`.
 - Ponte Discord: `DISCORD_BRIDGE_ENABLED`, `DISCORD_BOT_TOKEN`, `DISCORD_BRIDGE_WEBHOOK_URL`, `DISCORD_BRIDGE_CHANNEL_ID`.
 - Rate limit: `RATE_LIMIT_PING_SECONDS`, `RATE_LIMIT_VOIP_SECONDS`.
 
@@ -148,6 +152,8 @@ Observacoes importantes:
 - `ISSABEL_AMI_RAWMAN_URL` normaliza URL sem path para `/asterisk/rawman` e pode sobrescrever a porta efetiva do AMI.
 - `ISSABEL_AMI_PEER_NAME_REGEX` normaliza o erro comum `^\\d+$` para `^\d+$`.
 - `ZABBIX_BASE_URL` e `ZABBIX_API_TOKEN` devem ser preenchidos juntos ou deixados vazios juntos.
+- A ponte Discord exige `TELEGRAM_ALLOWED_CHAT_ID`, `DISCORD_BOT_TOKEN` e `DISCORD_BRIDGE_WEBHOOK_URL` quando habilitada.
+- `LINK_SUMMARY_DISCORD_WEBHOOK_URL` (arquivo `sites-uteis`) e `DISCORD_BRIDGE_WEBHOOK_URL` (sala da ponte) devem ser webhooks distintos.
 
 ## Chamadas Externas
 
@@ -167,7 +173,8 @@ Fontes principais:
 - Zabbix API JSON-RPC quando configurado.
 - Issabel/Asterisk por Rawman HTTP ou AMI TCP/TLS.
 - SIPp para probes VoIP em `tools/voip_probe/`.
-- Ollama `/api/generate` para resumo de links e Discord webhook para arquivar em `sites-uteis`.
+- Ollama remoto `/api/generate` (Gemma4) para resumo de links, incluindo contexto de README de repositorios GitHub.
+- Discord webhook para arquivar em `sites-uteis`.
 - Discord Gateway via `discord.py` para ler a sala configurada e webhook Discord
   separado para publicar mensagens espelhadas da ponte.
 

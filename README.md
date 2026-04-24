@@ -8,10 +8,10 @@ Bot em Python para executar automações pelo Telegram com arquitetura separada 
 - Comando `status` e `/status`
 - Comando `/host` para monitoramento de infraestrutura (Locaweb, Meta e Cisco Umbrella)
 - Comando `/zabbixh` para consultar metricas de hosts configurados no Zabbix
-- Resumo automatico de link enviado sozinho no Telegram:
-  - faz scraping leve da pagina
-  - resume com Ollama/Gemma
-  - salva no Discord via webhook configurado
+- Resumo automatico de link enviado sozinho no Telegram ou no canal da ponte Discord:
+  - faz scraping leve da pagina e enriquece contexto de repositorio GitHub com README
+  - resume com Gemma4 remoto via Ollama (`/api/generate`)
+  - salva no Discord (`sites-uteis`) via webhook configurado, incluindo origem
 - Ponte Telegram/Discord opcional:
   - le comandos e links no canal Discord configurado
   - replica mensagens que acionam o bot e respostas entre Telegram e Discord
@@ -87,12 +87,14 @@ Exemplo seguro de `ZABBIXH_HOST_TARGETS_JSON`:
 
 Esse campo existe para permitir inclusao, exclusao e edicao de hosts monitorados sem alterar codigo. O comando `/zabbixh` usa os `hostids` configurados nesse JSON e tenta resolver, para cada host, CPU, memoria, uptime e uso do disco `/`.
 
-### Variaveis de resumo de links
-- `LINK_SUMMARY_OLLAMA_BASE_URL`: URL base do Ollama, por exemplo `http://192.168.0.14:11434`
+### Variaveis de resumo de links (Gemma4 remoto)
+- `LINK_SUMMARY_OLLAMA_BASE_URL`: URL base do Ollama remoto, por exemplo `http://ollama-remoto.example:11434`
 - `LINK_SUMMARY_OLLAMA_MODEL`: modelo usado no `/api/generate`, por exemplo `gemma4:e2b`
 - `LINK_SUMMARY_DISCORD_WEBHOOK_URL`: webhook do Discord da sala `sites-uteis`; deve existir apenas no `.env`
 - `LINK_SUMMARY_TIMEOUT_SECONDS`: timeout de scraping, Ollama e Discord
 - `LINK_SUMMARY_MAX_TEXT_CHARS`: limite de texto extraido enviado ao modelo
+
+Quando `LINK_SUMMARY_OLLAMA_BASE_URL` aponta para outro host, garanta conectividade HTTP ate o `/api/generate` desse Ollama remoto.
 
 O bot processa apenas mensagens autorizadas cujo conteudo seja um unico link `http://` ou `https://`. Textos com link embutido sao ignorados.
 
@@ -101,6 +103,8 @@ O bot processa apenas mensagens autorizadas cujo conteudo seja um unico link `ht
 - `DISCORD_BOT_TOKEN`: token do bot Discord; exige Message Content Intent habilitado
 - `DISCORD_BRIDGE_WEBHOOK_URL`: webhook da sala Discord usada pela ponte
 - `DISCORD_BRIDGE_CHANNEL_ID`: opcional; quando vazio, o bot tenta resolver pelo webhook
+
+Quando `DISCORD_BRIDGE_ENABLED=true`, o bot exige `TELEGRAM_ALLOWED_CHAT_ID`, `DISCORD_BOT_TOKEN` e `DISCORD_BRIDGE_WEBHOOK_URL`.
 
 O webhook de `DISCORD_BRIDGE_WEBHOOK_URL` e separado de `LINK_SUMMARY_DISCORD_WEBHOOK_URL`.
 O primeiro serve para a sala unica Telegram/Discord; o segundo arquiva links uteis.
